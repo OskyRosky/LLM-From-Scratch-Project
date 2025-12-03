@@ -51,10 +51,10 @@ class TransformerBlock(nn.Module):
 
         self.ln2 = LayerNorm(embed_dim)
         self.ff = FeedForward(
-            embed_dim=embed_dim,
+            d_model=embed_dim,
             hidden_dim=ff_hidden_dim,
             dropout=dropout,
-        )
+            )
 
     def forward(
         self,
