@@ -82,8 +82,7 @@ class GPTModel(nn.Module):
         # Proyección a vocabulario
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # Tie weights: usamos los mismos pesos para embedding de entrada y
-        # proyección de salida (truco clásico de GPT / transformers)
+        # Weight tying: compartir pesos entre embedding de entrada y proyección de salida
         self.lm_head.weight = self.tok_embedding.embedding.weight
 
     def forward(
@@ -143,3 +142,78 @@ class GPTModel(nn.Module):
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         return logits, all_attn
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: Tensor,          # (batch_size, seq_len_inicial)
+        max_new_tokens: int = 20,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+    ) -> Tensor:
+        """
+        Generación autoregresiva simple (greedy / sampling).
+
+        Parameters
+        ----------
+        input_ids:
+            Tensor de enteros (batch_size, seq_len).
+        max_new_tokens:
+            Cuántos tokens nuevos queremos generar.
+        temperature:
+            Escala los logits antes del softmax (temperature > 1 => más plano).
+            Si temperature == 0, se ignora y se hace greedy puro.
+        top_k:
+            Si no es None, mantiene solo los top_k logits más altos
+            antes del softmax (sampling más enfocado).
+
+        Returns
+        -------
+        Tensor (batch_size, seq_len + max_new_tokens)
+            Secuencias originales + tokens generados.
+        """
+        self.eval()  # modo evaluación
+
+        out_ids = input_ids.clone()
+
+        for _ in range(max_new_tokens):
+            # Recortar contexto a max_seq_len si hace falta
+            if out_ids.size(1) > self.config.max_seq_len:
+                context = out_ids[:, -self.config.max_seq_len :]
+            else:
+                context = out_ids
+
+            # Forward: obtenemos logits para todos los pasos,
+            # nos interesa solo el último token
+            logits, _ = self(context)
+            logits = logits[:, -1, :]  # (batch_size, vocab_size)
+
+            if temperature > 0.0:
+                logits = logits / temperature
+
+            # Opcional: top-k truncation
+            if top_k is not None:
+                top_k_vals, _ = torch.topk(logits, k=top_k, dim=-1)
+                # umbral = menor logit dentro de top_k para cada fila
+                min_top_k = top_k_vals[:, -1].unsqueeze(-1)
+                logits = torch.where(
+                    logits < min_top_k,
+                    torch.full_like(logits, float("-inf")),
+                    logits,
+                )
+
+            # Convertir a probabilidades
+            probs = torch.softmax(logits, dim=-1)
+
+            # Estrategia de muestreo:
+            #   - si temperature == 0 -> greedy (argmax)
+            #   - si temperature > 0 -> sampling multinomial
+            if temperature == 0.0:
+                next_token = torch.argmax(probs, dim=-1, keepdim=True)
+            else:
+                next_token = torch.multinomial(probs, num_samples=1)
+
+            # Concatenar nuevo token
+            out_ids = torch.cat([out_ids, next_token], dim=1)
+
+        return out_ids
