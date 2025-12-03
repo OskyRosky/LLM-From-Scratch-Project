@@ -1,3 +1,5 @@
+# src/model/layers.py (solo la clase FeedForward)
+
 from typing import Optional
 
 import torch
@@ -80,42 +82,37 @@ class PositionalEmbedding(nn.Module):
 
 class FeedForward(nn.Module):
     """
-    Position-wise feed-forward network used in Transformer blocks.
+    MLP posición-a-posición usado dentro del bloque Transformer.
 
-    Typically:
-        d_ff = 4 * d_model
+    Estructura típica:
+        x -> Linear(d_model -> hidden_dim)
+           -> GELU
+           -> Linear(hidden_dim -> d_model)
+           -> Dropout
     """
 
     def __init__(
         self,
         d_model: int,
-        d_ff: Optional[int] = None,
+        hidden_dim: Optional[int] = None,
         dropout: float = 0.0,
-        activation: str = "gelu",
     ) -> None:
         super().__init__()
 
-        if d_ff is None:
-            d_ff = 4 * d_model
+        if hidden_dim is None:
+            hidden_dim = 4 * d_model  # valor típico en GPT
 
-        self.fc1 = nn.Linear(d_model, d_ff)
-        self.fc2 = nn.Linear(d_ff, d_model)
+        self.fc1 = nn.Linear(d_model, hidden_dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, d_model)
         self.dropout = nn.Dropout(dropout)
-
-        if activation == "gelu":
-            self.act = nn.GELU()
-        elif activation == "relu":
-            self.act = nn.ReLU()
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
 
     def forward(self, x: Tensor) -> Tensor:
         """
-        Input and output shapes: (batch_size, seq_len, d_model)
+        x: (batch_size, seq_len, d_model)
         """
         x = self.fc1(x)
         x = self.act(x)
-        x = self.dropout(x)
         x = self.fc2(x)
         x = self.dropout(x)
         return x
