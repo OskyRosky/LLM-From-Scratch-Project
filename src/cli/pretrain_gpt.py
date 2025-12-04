@@ -152,7 +152,7 @@ def run_training(args: argparse.Namespace) -> None:
 
     # 6) Entrenamiento controlado por max_steps
     global_step = 0
-    best_val_loss = float("inf")
+    best_val_loss = float("inf")  # por ahora no lo usamos, pero lo dejamos
     max_steps = args.max_steps
     max_epochs = args.max_epochs
 
@@ -196,13 +196,22 @@ def run_training(args: argparse.Namespace) -> None:
 
     logger.info("Finished training loop, running final validation...")
 
-    # 7) Evaluación final sobre el conjunto de validación completo
-    # Mostramos también progreso durante la validación
-        val_loss = trainer.evaluate(
-            val_loader,
-            logger=logger,
-            log_every=500,  # o el valor que prefieras
-        )
+    # 7) Evaluación final sobre el conjunto de validación
+    #    Usamos solo una muestra de batches para no tardar horas.
+    if len(val_loader) > 0:
+        max_val_batches = min(len(val_loader), 1000)  # p.ej. máximo 1000 batches
+        val_log_every = max(1, max_val_batches // 20)  # ~20 logs durante la validación
+    else:
+        max_val_batches = 0
+        val_log_every = 1
+
+    val_loss = trainer.evaluate(
+        val_loader,
+        logger=logger,
+        log_every=val_log_every,
+        max_batches=max_val_batches,
+    )
+
     train_ppl = loss_to_perplexity(last_train_loss if last_train_loss is not None else val_loss)
     val_ppl = loss_to_perplexity(val_loss)
 
@@ -227,6 +236,7 @@ def run_training(args: argparse.Namespace) -> None:
     tok_path = Path(ckpt_dir) / "char_tokenizer.pt"
     save_tokenizer(tokenizer, str(tok_path))
     logger.info(f"Tokenizer saved at: {tok_path}")
+
 
 # ---------------------------------------------------------
 #  CLI
