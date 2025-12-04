@@ -97,14 +97,17 @@ def save_tokenizer(tokenizer: CharacterTokenizer, path: str) -> None:
 #  Entrenamiento principal
 # ---------------------------------------------------------
 def run_training(args: argparse.Namespace) -> None:
-    # Logger
     logger = get_logger("pretrain_gpt")
 
-    # Config de entrenamiento general
-    train_cfg = TrainingConfig()
+    # Config de entrenamiento: aquí conectamos batch_size y device del CLI
+    train_cfg = TrainingConfig(
+        batch_size=args.batch_size,
+        device=args.device,
+    )
     set_seed(train_cfg.seed)
 
-    logger.info(f"Using device: {train_cfg.resolved_device()}")
+    device = train_cfg.resolved_device()
+    logger.info(f"Using device: {device}")
 
     # 1) Datos + tokenizador
     logger.info(f"Loading and preparing data from {args.data_path}")
@@ -116,7 +119,7 @@ def run_training(args: argparse.Namespace) -> None:
     train_loader, val_loader = build_dataloaders(
         train_ds=train_ds,
         val_ds=val_ds,
-        batch_size=args.batch_size,
+        batch_size=train_cfg.batch_size,
     )
 
     # 2) Config y modelo GPT (pequeño)
@@ -139,12 +142,12 @@ def run_training(args: argparse.Namespace) -> None:
     # 3) Optimizador
     optimizer = create_optimizer(model, train_cfg)
 
-    # 4) Trainer
+    # 4) Trainer (el Trainer se encarga de mover el modelo al dispositivo)
     ckpt_dir = args.ckpt_dir
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
-        train_cfg=train_cfg,
+        config=train_cfg,
         ckpt_dir=ckpt_dir,
     )
 
@@ -274,6 +277,15 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default="models/checkpoints",
         help="Directorio donde guardar checkpoints y tokenizador.",
+    )
+
+    # Dispositivo
+    p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "mps", "cuda"],
+        help="Dispositivo para entrenar el modelo (auto|cpu|mps|cuda).",
     )
 
     return p
