@@ -1,0 +1,7 @@
+# --- Large raw corpora (no versionar) ---
+data/raw/oscar-small-train.parquet
+data/raw/oscar_corpus.txt
+
+# patrón general por si creas más
+data/raw/*.parquet
+data/raw/*corpus*.txt
