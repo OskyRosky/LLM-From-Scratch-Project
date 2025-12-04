@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from torch import nn, Tensor
@@ -17,7 +17,7 @@ class Trainer:
     """
     Entrenador genérico para language modeling (GPT pequeño).
 
-    Supone que:
+    Asume que:
       - el modelo devuelve (logits, attn) en el forward,
       - los dataloaders devuelven (input_ids, target_ids) de enteros.
     """
@@ -26,39 +26,50 @@ class Trainer:
         self,
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
-        config: TrainingConfig,
+        train_cfg: TrainingConfig,
         ckpt_dir: str = "models/checkpoints",
+        device: Optional[torch.device] = None,
+        grad_clip: Optional[float] = None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
-        self.config = config
+        self.config = train_cfg  # 👈 usamos siempre self.config
 
-        # --------- Dispositivo ---------
-        # Usamos la lógica centralizada en TrainingConfig
-        self.device: torch.device = self.config.resolved_device()
-        self.model.to(self.device)
+        # Dispositivo
+        if device is None:
+            self.device = self.config.resolved_device()
+        else:
+            self.device = device
 
-        # Gradiente máximo (para clipping)
-        self.grad_clip: Optional[float] = getattr(self.config, "max_grad_norm", None)
+        # Grad clip: si no se pasa, intentamos leerlo del config
+        if grad_clip is not None:
+            self.grad_clip = grad_clip
+        else:
+            # Usamos max_grad_norm si existe, si no, None
+            self.grad_clip = getattr(self.config, "max_grad_norm", None)
 
-        # --------- Checkpoints ---------
+        # Logging interno opcional
+        self.log_every: Optional[int] = getattr(self.config, "log_every", None)
+
+        # Directorio de checkpoints
         self.ckpt_dir = Path(ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Enviar modelo al dispositivo
+        self.model.to(self.device)
 
     # ---------------------------------------------------------
     #  Helpers
     # ---------------------------------------------------------
     def _move_batch_to_device(
         self, input_ids: Tensor, target_ids: Tensor
-    ) -> tuple[Tensor, Tensor]:
-        """Mueve un batch al dispositivo de entrenamiento."""
+    ) -> Tuple[Tensor, Tensor]:
         return input_ids.to(self.device), target_ids.to(self.device)
 
     def _step(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         """
-        Un paso de forward + cálculo de loss (sin backward ni optimizer).
-
-        Devuelve la loss (tensor escalar).
+        Un paso de forward + loss (sin backward ni optimizer).
+        Devuelve la loss (scalar tensor).
         """
         logits, _ = self.model(input_ids)  # (B, T, vocab)
         loss = language_modeling_loss(logits, target_ids)
@@ -85,20 +96,17 @@ class Trainer:
             loss = self._step(input_ids, target_ids)
             loss.backward()
 
-            # Clipping de gradiente (si está configurado)
             if self.grad_clip is not None and self.grad_clip > 0.0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.grad_clip
-                )
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
             self.optimizer.step()
 
             total_loss += loss.item()
             num_batches += 1
 
-            # Logging opcional
-            if self.config.log_every and step % self.config.log_every == 0:
-                print(f"[train] step {step}  loss={loss.item():.4f}")
+            # Logging liviano opcional (por ahora solo print)
+            if self.log_every and step % self.log_every == 0:
+                print(f"[train_step {step}] loss={loss.item():.4f}")
 
         mean_loss = total_loss / max(1, num_batches)
         return mean_loss
@@ -114,7 +122,7 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for step, batch in enumerate(dataloader, start=1):
+        for batch in dataloader:
             input_ids, target_ids = batch
             input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
 

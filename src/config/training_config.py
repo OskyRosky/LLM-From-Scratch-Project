@@ -1,62 +1,62 @@
-from dataclasses import dataclass, asdict
+# src/config/training_config.py
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import torch
 
 
 @dataclass
 class TrainingConfig:
     """
-    Central place to store training and model hyperparameters.
+    Configuración para el entrenamiento del modelo.
 
-    This config is intentionally small for now; we can extend it
-    later when the project grows (different models, datasets, etc.).
+    - batch_size: tamaño de batch por step.
+    - learning_rate: tasa de aprendizaje base.
+    - weight_decay: regularización L2 para parámetros con peso.
+    - betas: coeficientes (beta1, beta2) de AdamW.
+    - max_grad_norm: norma máxima para clip de gradiente (si > 0).
+    - log_every: (opcional) cada cuántos steps loguear dentro de un epoch.
+    - seed: semilla para reproducibilidad.
+    - device: "auto" | "cpu" | "mps" | "cuda".
     """
 
-    # General
-    model_name: str = "gpt-mini"
-    seed: int = 42
-
-    # Optimization
     batch_size: int = 32
-    num_epochs: int = 5
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
+    betas: tuple[float, float] = (0.9, 0.95)
     max_grad_norm: float = 1.0
 
-    # Model architecture (we will tune these later)
-    vocab_size: int = 30_000
-    max_seq_len: int = 256
-    d_model: int = 256
-    n_heads: int = 8
-    n_layers: int = 4
-    dropout: float = 0.1
+    log_every: int = 10
+    seed: int = 42
 
-    # Device / training details
-    device: str = "auto"  # "auto", "cpu", "cuda", "mps"
-    log_every_n_steps: int = 50
-    save_every_n_steps: int = 500
-    output_dir: str = "models/checkpoints"
+    device: str = "auto"  # "auto" | "cpu" | "mps" | "cuda"
 
-    def resolved_device(self) -> str:
+    def resolved_device(self) -> torch.device:
         """
-        Resolve 'auto' into a concrete device string based on availability.
+        Devuelve un torch.device según:
+          - valor explícito de self.device, o
+          - autodetección de mps/cuda/cpu si device == "auto".
         """
-        import torch
+        # Forzar CPU
+        if self.device == "cpu":
+            return torch.device("cpu")
 
-        if self.device != "auto":
-            return self.device
+        # Forzar MPS (Apple) si está disponible
+        if self.device == "mps" and torch.backends.mps.is_available():
+            return torch.device("mps")
 
-        if torch.cuda.is_available():
-            return "cuda"
+        # Forzar CUDA si está disponible
+        if self.device == "cuda" and torch.cuda.is_available():
+            return torch.device("cuda")
 
-        # For Apple Silicon / MPS (Mac)
-        mps_backend = getattr(torch.backends, "mps", None)
-        if mps_backend is not None and mps_backend.is_available():
-            return "mps"
+        # Modo auto
+        if self.device == "auto":
+            # Preferimos MPS, luego CUDA, luego CPU
+            if torch.backends.mps.is_available():
+                return torch.device("mps")
+            if torch.cuda.is_available():
+                return torch.device("cuda")
 
-        return "cpu"
-
-    def to_dict(self) -> dict:
-        """
-        Small helper to convert the config into a plain dictionary
-        (useful for logging, saving to JSON, etc.).
-        """
-        return asdict(self)
+        # Fallback
+        return torch.device("cpu")
