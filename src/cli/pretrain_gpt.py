@@ -197,10 +197,14 @@ def run_training(args: argparse.Namespace) -> None:
     logger.info("Finished training loop, running final validation...")
 
     # 7) Evaluación final sobre el conjunto de validación
-    #    Usamos solo una muestra de batches para no tardar horas.
+    #    Usamos solo una muestra de batches para no tardar horas,
+    #    pero con logs más frecuentes (~0.5% de avance).
     if len(val_loader) > 0:
-        max_val_batches = min(len(val_loader), 1000)  # p.ej. máximo 1000 batches
-        val_log_every = max(1, max_val_batches // 20)  # ~20 logs durante la validación
+        max_val_batches = min(len(val_loader), 1000)  # seguimos limitando a 1000
+        # Queremos ~0.5% de resolución -> ~200 logs
+        target_log_percent = 0.5
+        num_logs = max(1, int(100 / target_log_percent))  # 200
+        val_log_every = max(1, max_val_batches // num_logs)
     else:
         max_val_batches = 0
         val_log_every = 1
