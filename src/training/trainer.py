@@ -17,7 +17,7 @@ class Trainer:
     """
     Entrenador genérico para language modeling (GPT pequeño).
 
-    Asume que:
+    Supone que:
       - el modelo devuelve (logits, attn) en el forward,
       - los dataloaders devuelven (input_ids, target_ids) de enteros.
     """
@@ -26,34 +26,24 @@ class Trainer:
         self,
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
-        train_cfg: TrainingConfig,
+        config: TrainingConfig,
         ckpt_dir: str = "models/checkpoints",
-        device: Optional[torch.device] = None,
-        grad_clip: Optional[float] = None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
-        self.train_cfg = train_cfg
+        self.config = config
 
-        # Dispositivo
-        if device is None:
-            device_str = train_cfg.resolved_device()
-            self.device = torch.device(device_str)
-        else:
-            self.device = device
+        # --------- Dispositivo ---------
+        # Usamos la lógica centralizada en TrainingConfig
+        self.device: torch.device = self.config.resolved_device()
+        self.model.to(self.device)
 
-        # Grad clip: si no se pasa, intentamos leerlo del config
-        if grad_clip is not None:
-            self.grad_clip = grad_clip
-        else:
-            self.grad_clip = getattr(train_cfg, "grad_clip", None)
+        # Gradiente máximo (para clipping)
+        self.grad_clip: Optional[float] = getattr(self.config, "max_grad_norm", None)
 
-        # Directorio de checkpoints
+        # --------- Checkpoints ---------
         self.ckpt_dir = Path(ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        # Enviar modelo al dispositivo
-        self.model.to(self.device)
 
     # ---------------------------------------------------------
     #  Helpers
@@ -61,19 +51,21 @@ class Trainer:
     def _move_batch_to_device(
         self, input_ids: Tensor, target_ids: Tensor
     ) -> tuple[Tensor, Tensor]:
+        """Mueve un batch al dispositivo de entrenamiento."""
         return input_ids.to(self.device), target_ids.to(self.device)
 
     def _step(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         """
-        Un paso de forward + loss (sin backward ni optimizer).
-        Devuelve la loss (scalar tensor).
+        Un paso de forward + cálculo de loss (sin backward ni optimizer).
+
+        Devuelve la loss (tensor escalar).
         """
         logits, _ = self.model(input_ids)  # (B, T, vocab)
         loss = language_modeling_loss(logits, target_ids)
         return loss
 
     # ---------------------------------------------------------
-    #  EPCHAS
+    #  Épocas
     # ---------------------------------------------------------
     def train_epoch(self, dataloader: DataLoader) -> float:
         """
@@ -85,7 +77,7 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for batch in dataloader:
+        for step, batch in enumerate(dataloader, start=1):
             input_ids, target_ids = batch
             input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
 
@@ -93,6 +85,7 @@ class Trainer:
             loss = self._step(input_ids, target_ids)
             loss.backward()
 
+            # Clipping de gradiente (si está configurado)
             if self.grad_clip is not None and self.grad_clip > 0.0:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.grad_clip
@@ -102,6 +95,10 @@ class Trainer:
 
             total_loss += loss.item()
             num_batches += 1
+
+            # Logging opcional
+            if self.config.log_every and step % self.config.log_every == 0:
+                print(f"[train] step {step}  loss={loss.item():.4f}")
 
         mean_loss = total_loss / max(1, num_batches)
         return mean_loss
@@ -117,7 +114,7 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for batch in dataloader:
+        for step, batch in enumerate(dataloader, start=1):
             input_ids, target_ids = batch
             input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
 
@@ -152,7 +149,7 @@ class Trainer:
             "epoch": epoch,
             "global_step": global_step,
             "val_loss": val_loss,
-            "training_config": self.train_cfg.__dict__,
+            "training_config": self.config.__dict__,
         }
 
         torch.save(payload, ckpt_path)
