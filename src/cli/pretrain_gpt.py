@@ -99,11 +99,12 @@ def save_tokenizer(tokenizer: CharacterTokenizer, path: str) -> None:
 def run_training(args: argparse.Namespace) -> None:
     logger = get_logger("pretrain_gpt")
 
-    # 1) Config de entrenamiento general (ahora sí usamos args.batch_size y args.device)
+    # 1) Config de entrenamiento general (usa batch_size y device del CLI)
     train_cfg = TrainingConfig(
         batch_size=args.batch_size,
         device=args.device,
     )
+    set_seed(train_cfg.seed)
 
     logger.info(f"Using device: {train_cfg.resolved_device()}")
 
@@ -140,70 +141,92 @@ def run_training(args: argparse.Namespace) -> None:
     # 4) Optimizador
     optimizer = create_optimizer(model, train_cfg)
 
-    # 5) Trainer (aquí está el cambio clave → usamos train_cfg=)
+    # 5) Trainer
     ckpt_dir = args.ckpt_dir
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
-        train_cfg=train_cfg,  # ✅ nombre correcto del parámetro
+        train_cfg=train_cfg,
         ckpt_dir=ckpt_dir,
     )
 
-    # ... y el resto de run_training igual que ya lo tienes
-
-    # 5) Entrenamiento por steps (no solo por epochs)
+    # 6) Entrenamiento controlado por max_steps
     global_step = 0
     best_val_loss = float("inf")
     max_steps = args.max_steps
     max_epochs = args.max_epochs
+
+    log_every = getattr(train_cfg, "log_every", 10)
 
     logger.info(
         f"Starting training for up to {max_epochs} epochs "
         f"or {max_steps} steps (lo que ocurra primero)."
     )
 
+    last_epoch_used = 0
+    last_train_loss = None
+
     for epoch in range(max_epochs):
         if global_step >= max_steps:
             break
 
-        # ---- TRAIN ----
-        train_loss = trainer.train_epoch(train_loader)
-        global_step += len(train_loader)
+        for batch in train_loader:
+            if global_step >= max_steps:
+                break
 
-        # ---- EVAL ----
-        val_loss = trainer.evaluate(val_loader)
+            input_ids, target_ids = batch
+            global_step += 1
 
-        train_ppl = loss_to_perplexity(train_loss)
-        val_ppl = loss_to_perplexity(val_loss)
+            # Un paso de entrenamiento
+            loss = trainer.train_step(input_ids, target_ids)
+            last_train_loss = loss
+            last_epoch_used = epoch
 
-        logger.info(
-            f"[Epoch {epoch}] train_loss={train_loss:.4f} "
-            f"val_loss={val_loss:.4f} "
-            f"train_ppl={train_ppl:.2f} "
-            f"val_ppl={val_ppl:.2f} "
-            f"global_step={global_step}"
-        )
+            # Logueo periódico con porcentaje
+            if log_every and global_step % log_every == 0:
+                progress = 100.0 * global_step / max_steps
+                logger.info(
+                    f"[step {global_step}/{max_steps} "
+                    f"({progress:.2f}%)] loss={loss:.4f}"
+                )
 
-        # Guardar mejor checkpoint
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            ckpt_path = trainer.save_checkpoint(
-                filename="gpt_char_best.pt",
-                epoch=epoch,
-                global_step=global_step,
-                val_loss=val_loss,
-            )
-            logger.info(f"New best checkpoint saved at: {ckpt_path}")
-
+        # Si ya llegamos a max_steps salimos del loop externo
         if global_step >= max_steps:
-            logger.info("Reached max_steps, stopping training.")
             break
 
-    # 6) Guardar tokenizador usable luego
+    logger.info("Finished training loop, running final validation...")
+
+    # 7) Evaluación final sobre el conjunto de validación completo
+    # Mostramos también progreso durante la validación
+        val_loss = trainer.evaluate(
+            val_loader,
+            logger=logger,
+            log_every=500,  # o el valor que prefieras
+        )
+    train_ppl = loss_to_perplexity(last_train_loss if last_train_loss is not None else val_loss)
+    val_ppl = loss_to_perplexity(val_loss)
+
+    logger.info(
+        f"[Final Eval] train_loss={last_train_loss:.4f} "
+        f"val_loss={val_loss:.4f} "
+        f"train_ppl={train_ppl:.2f} "
+        f"val_ppl={val_ppl:.2f} "
+        f"global_step={global_step}"
+    )
+
+    # Guardamos un único checkpoint "best" (es el último)
+    ckpt_path = trainer.save_checkpoint(
+        filename="gpt_char_best.pt",
+        epoch=last_epoch_used,
+        global_step=global_step,
+        val_loss=val_loss,
+    )
+    logger.info(f"Checkpoint saved at: {ckpt_path}")
+
+    # 8) Guardar tokenizador usable luego
     tok_path = Path(ckpt_dir) / "char_tokenizer.pt"
     save_tokenizer(tokenizer, str(tok_path))
     logger.info(f"Tokenizer saved at: {tok_path}")
-
 
 # ---------------------------------------------------------
 #  CLI

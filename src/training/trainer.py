@@ -33,23 +33,19 @@ class Trainer:
     ) -> None:
         self.model = model
         self.optimizer = optimizer
-        self.config = train_cfg  # 👈 usamos siempre self.config
+        self.config = train_cfg
 
         # Dispositivo
-        if device is None:
-            self.device = self.config.resolved_device()
-        else:
+        if device is not None:
             self.device = device
+        else:
+            self.device = train_cfg.resolved_device()
 
-        # Grad clip: si no se pasa, intentamos leerlo del config
+        # Grad clip (usamos max_grad_norm si existe en el config)
         if grad_clip is not None:
             self.grad_clip = grad_clip
         else:
-            # Usamos max_grad_norm si existe, si no, None
-            self.grad_clip = getattr(self.config, "max_grad_norm", None)
-
-        # Logging interno opcional
-        self.log_every: Optional[int] = getattr(self.config, "log_every", None)
+            self.grad_clip = getattr(train_cfg, "max_grad_norm", None)
 
         # Directorio de checkpoints
         self.ckpt_dir = Path(ckpt_dir)
@@ -76,7 +72,35 @@ class Trainer:
         return loss
 
     # ---------------------------------------------------------
-    #  Épocas
+    #  Paso individual (lo que usará pretrain_gpt)
+    # ---------------------------------------------------------
+    def train_step(self, input_ids: Tensor, target_ids: Tensor) -> float:
+        """
+        Un paso de entrenamiento (un batch):
+          - mueve a device
+          - forward
+          - backward
+          - clip grad (si aplica)
+          - optimizer.step()
+
+        Devuelve la loss como float.
+        """
+        self.model.train()
+        input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        loss = self._step(input_ids, target_ids)
+        loss.backward()
+
+        if self.grad_clip is not None and self.grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+        self.optimizer.step()
+
+        return float(loss.item())
+
+    # ---------------------------------------------------------
+    #  Época completa (la dejamos por compatibilidad)
     # ---------------------------------------------------------
     def train_epoch(self, dataloader: DataLoader) -> float:
         """
@@ -88,41 +112,35 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for step, batch in enumerate(dataloader, start=1):
-            input_ids, target_ids = batch
-            input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
-
-            self.optimizer.zero_grad(set_to_none=True)
-            loss = self._step(input_ids, target_ids)
-            loss.backward()
-
-            if self.grad_clip is not None and self.grad_clip > 0.0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-            self.optimizer.step()
-
-            total_loss += loss.item()
+        for input_ids, target_ids in dataloader:
+            batch_loss = self.train_step(input_ids, target_ids)
+            total_loss += batch_loss
             num_batches += 1
-
-            # Logging liviano opcional (por ahora solo print)
-            if self.log_every and step % self.log_every == 0:
-                print(f"[train_step {step}] loss={loss.item():.4f}")
 
         mean_loss = total_loss / max(1, num_batches)
         return mean_loss
 
-    @torch.no_grad()
-    def evaluate(self, dataloader: DataLoader) -> float:
+        @torch.no_grad()
+    def evaluate(
+        self,
+        dataloader: DataLoader,
+        logger=None,
+        log_every: Optional[int] = None,
+    ) -> float:
         """
         Evalúa el modelo sobre un dataloader (sin gradientes).
 
         Devuelve la loss media.
+        Si se pasa logger y log_every, va mostrando el progreso en %
+        durante la validación.
         """
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
 
-        for batch in dataloader:
+        total_batches = len(dataloader)  # para porcentaje
+
+        for batch_idx, batch in enumerate(dataloader, start=1):
             input_ids, target_ids = batch
             input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
 
@@ -130,6 +148,14 @@ class Trainer:
 
             total_loss += loss.item()
             num_batches += 1
+
+            # Logging opcional de progreso
+            if logger is not None and log_every and batch_idx % log_every == 0:
+                progress = 100.0 * batch_idx / total_batches
+                logger.info(
+                    f"[val {batch_idx}/{total_batches} "
+                    f"({progress:.2f}%)] loss={loss.item():.4f}"
+                )
 
         mean_loss = total_loss / max(1, num_batches)
         return mean_loss
