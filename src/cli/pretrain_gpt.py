@@ -99,17 +99,15 @@ def save_tokenizer(tokenizer: CharacterTokenizer, path: str) -> None:
 def run_training(args: argparse.Namespace) -> None:
     logger = get_logger("pretrain_gpt")
 
-    # Config de entrenamiento: aquí conectamos batch_size y device del CLI
+    # 1) Config de entrenamiento general (ahora sí usamos args.batch_size y args.device)
     train_cfg = TrainingConfig(
         batch_size=args.batch_size,
         device=args.device,
     )
-    set_seed(train_cfg.seed)
 
-    device = train_cfg.resolved_device()
-    logger.info(f"Using device: {device}")
+    logger.info(f"Using device: {train_cfg.resolved_device()}")
 
-    # 1) Datos + tokenizador
+    # 2) Datos + tokenizador
     logger.info(f"Loading and preparing data from {args.data_path}")
     tokenizer, train_ds, val_ds = build_datasets_and_tokenizer(
         text_path=args.data_path,
@@ -119,10 +117,10 @@ def run_training(args: argparse.Namespace) -> None:
     train_loader, val_loader = build_dataloaders(
         train_ds=train_ds,
         val_ds=val_ds,
-        batch_size=train_cfg.batch_size,
+        batch_size=args.batch_size,
     )
 
-    # 2) Config y modelo GPT (pequeño)
+    # 3) Config y modelo GPT (pequeño)
     vocab_size = tokenizer.vocab_size
     logger.info(
         f"Vocab size = {vocab_size}, seq_len = {args.seq_len}, "
@@ -139,17 +137,19 @@ def run_training(args: argparse.Namespace) -> None:
     )
     model = GPTModel(gpt_cfg)
 
-    # 3) Optimizador
+    # 4) Optimizador
     optimizer = create_optimizer(model, train_cfg)
 
-    # 4) Trainer (el Trainer se encarga de mover el modelo al dispositivo)
+    # 5) Trainer (aquí está el cambio clave → usamos train_cfg=)
     ckpt_dir = args.ckpt_dir
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
-        config=train_cfg,
+        train_cfg=train_cfg,  # ✅ nombre correcto del parámetro
         ckpt_dir=ckpt_dir,
     )
+
+    # ... y el resto de run_training igual que ya lo tienes
 
     # 5) Entrenamiento por steps (no solo por epochs)
     global_step = 0
