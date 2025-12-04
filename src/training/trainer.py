@@ -120,27 +120,41 @@ class Trainer:
         mean_loss = total_loss / max(1, num_batches)
         return mean_loss
 
-        @torch.no_grad()
+    # ---------------------------------------------------------
+    #  Evaluación
+    # ---------------------------------------------------------
+    @torch.no_grad()
     def evaluate(
         self,
         dataloader: DataLoader,
         logger=None,
         log_every: Optional[int] = None,
+        max_batches: Optional[int] = None,
     ) -> float:
         """
         Evalúa el modelo sobre un dataloader (sin gradientes).
 
-        Devuelve la loss media.
-        Si se pasa logger y log_every, va mostrando el progreso en %
-        durante la validación.
+        - Si se pasa logger y log_every, muestra el progreso en %
+          durante la validación.
+        - Si se pasa max_batches, solo evalúa sobre los primeros
+          max_batches lotes (útil para no tardar horas).
         """
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
 
-        total_batches = len(dataloader)  # para porcentaje
+        if len(dataloader) == 0:
+            return 0.0
+
+        # Cuántos batches vamos a evaluar realmente
+        total_batches = len(dataloader)
+        if max_batches is not None:
+            total_batches = min(total_batches, max_batches)
 
         for batch_idx, batch in enumerate(dataloader, start=1):
+            if batch_idx > total_batches:
+                break
+
             input_ids, target_ids = batch
             input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
 
