@@ -44,7 +44,6 @@ class CharTokenizerFromState:
 
     def encode(self, text: str):
         # Usamos un ID por defecto para caracteres desconocidos
-        # Si existe "<unk>", lo usamos; si no, tomamos el primer ID de stoi.
         default_id = self.stoi.get("<unk>", next(iter(self.stoi.values())))
         return [self.stoi.get(ch, default_id) for ch in text]
 
@@ -118,11 +117,11 @@ def train_one_epoch(model, dataloader, optimizer, device):
         total_loss += loss.item()
         total_batches += 1
 
-        if batch_idx % 10 == 0 or batch_idx == len(dataloader):
-            print(
-                f"[train] batch {batch_idx}/{len(dataloader)} - "
-                f"loss: {loss.item():.4f}"
-            )
+        # Progreso simple por batch
+        print(
+            f"[train] batch {batch_idx}/{len(dataloader)} - "
+            f"loss: {loss.item():.4f}"
+        )
 
     avg_loss = total_loss / max(total_batches, 1)
     return avg_loss
@@ -137,22 +136,20 @@ def evaluate(model, dataloader, device):
 
     criterion = nn.CrossEntropyLoss()
 
-    torch.set_grad_enabled(False)
-    for batch in dataloader:
-        input_ids = batch["input_ids"].to(device)
-        labels = batch["label"].to(device)
+    with torch.no_grad():
+        for batch in dataloader:
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["label"].to(device)
 
-        logits = model(input_ids=input_ids)
-        loss = criterion(logits, labels)
+            logits = model(input_ids=input_ids)
+            loss = criterion(logits, labels)
 
-        total_loss += loss.item()
-        total_batches += 1
+            total_loss += loss.item()
+            total_batches += 1
 
-        preds = logits.argmax(dim=-1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    torch.set_grad_enabled(True)
+            preds = logits.argmax(dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
 
     avg_loss = total_loss / max(total_batches, 1)
     accuracy = correct / max(total, 1)
@@ -211,7 +208,7 @@ def main():
     print(f"[INFO] Usando dispositivo: {device}")
 
     # -------------------------
-    # 1. Paths del checkpoint y tokenizer
+    # 1. Cargar checkpoint y tokenizer
     # -------------------------
     ckpt_path = os.path.join(args.ckpt_dir, "gpt_char_best.pt")
     tok_path = os.path.join(args.ckpt_dir, "char_tokenizer.pt")
@@ -221,9 +218,6 @@ def main():
     if not os.path.isfile(tok_path):
         raise FileNotFoundError(f"No se encontró el tokenizer en {tok_path}")
 
-    # -------------------------
-    # 2. Cargar tokenizer y checkpoint
-    # -------------------------
     print(f"[INFO] Cargando tokenizer desde: {tok_path}")
     tok_state = torch.load(tok_path, map_location="cpu")
     stoi = tok_state["stoi"]
@@ -233,33 +227,115 @@ def main():
     print(f"[INFO] Cargando checkpoint desde: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
-    # Intentamos el formato "bonito" (config + model_state_dict)
+    # -------------------------
+    # 2. Reconstruir config + modelo base
+    # -------------------------
     if isinstance(ckpt, dict) and "config" in ckpt and "model_state_dict" in ckpt:
+        # Caso "bonito": guardamos config + pesos del modelo
         print("[INFO] Checkpoint con 'config' y 'model_state_dict' detectado.")
         config_dict = ckpt["config"]
         model_state = ckpt["model_state_dict"]
         config = GPTConfig(**config_dict)
-    else:
-        # Caso como el tuyo: checkpoint es solo state_dict
-        print("[WARN] Checkpoint sin 'config'; asumimos que es un state_dict puro.")
-        model_state = ckpt
 
-        # ⚠️ IMPORTANTE: pon aquí los MISMOS hiperparámetros que usaste en el pretraining
+    elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        # Tu caso actual: checkpoint de entrenamiento con varios campos
+        print("[INFO] Checkpoint de entrenamiento detectado (sin 'config').")
+        model_state = ckpt["model_state_dict"]
+
+        # Intentamos recuperar la config desde training_config si existe
+        training_cfg = ckpt.get("training_config", None)
+
+        tc = {}
+        if training_cfg is not None:
+            if hasattr(training_cfg, "__dict__"):
+                tc = vars(training_cfg)
+            elif isinstance(training_cfg, dict):
+                tc = training_cfg
+
+        # Valores por defecto, que sobreescribiremos con lo que podamos leer
+        d_model = tc.get("d_model", 256)
+        n_heads = tc.get("n_heads", 4)
+        n_layers = tc.get("n_layers", 4)
+        dropout = tc.get("dropout", 0.1)
+        max_seq_len = tc.get("seq_len") or tc.get("max_seq_len") or 256
+
+        # Ajustamos con las shapes reales de los pesos (más robusto)
+        we = model_state.get("tok_embedding.embedding.weight", None)
+        if we is not None:
+            vocab_size = we.shape[0]
+            d_model = we.shape[1]
+
+        pe = model_state.get("pos_embedding.pos_embedding.weight", None)
+        if pe is not None:
+            max_seq_len = pe.shape[0]
+
+        # Número de capas a partir de los nombres de los bloques
+        layer_ids = {
+            int(k.split(".")[1])
+            for k in model_state.keys()
+            if k.startswith("blocks.")
+        }
+        if layer_ids:
+            n_layers = max(layer_ids) + 1
+
+        print(
+            f"[INFO] Inferido desde checkpoint -> "
+            f"vocab_size={vocab_size}, max_seq_len={max_seq_len}, "
+            f"d_model={d_model}, n_layers={n_layers}, n_heads={n_heads}"
+        )
+
         config = GPTConfig(
             vocab_size=vocab_size,
-            block_size=256,   # <-- usa aquí tu --seq-len del pretraining
-            d_model=256,      # <-- tu --d-model
-            n_heads=4,        # <-- tu --n-heads
-            n_layers=4,       # <-- tu --n-layers
-            dropout=0.1,      # <-- tu --dropout
+            max_seq_len=max_seq_len,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            dropout=dropout,
+        )
+
+    else:
+        # Caso en que el checkpoint sea directamente un state_dict puro del modelo
+        print("[INFO] Checkpoint es un state_dict puro del modelo.")
+        model_state = ckpt
+
+        we = model_state["tok_embedding.embedding.weight"]
+        pe = model_state["pos_embedding.pos_embedding.weight"]
+
+        vocab_size = we.shape[0]
+        d_model = we.shape[1]
+        max_seq_len = pe.shape[0]
+
+        layer_ids = {
+            int(k.split(".")[1])
+            for k in model_state.keys()
+            if k.startswith("blocks.")
+        }
+        n_layers = max(layer_ids) + 1 if layer_ids else 0
+
+        # Heurística razonable para n_heads
+        n_heads = 4 if d_model % 4 == 0 else 1
+
+        print(
+            f"[INFO] Inferido desde state_dict -> "
+            f"vocab_size={vocab_size}, max_seq_len={max_seq_len}, "
+            f"d_model={d_model}, n_layers={n_layers}, n_heads={n_heads}"
+        )
+
+        config = GPTConfig(
+            vocab_size=vocab_size,
+            max_seq_len=max_seq_len,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            dropout=0.1,
         )
 
     base_model = GPTModel(config)
     base_model.load_state_dict(model_state)
     print("[INFO] Modelo base GPT cargado.")
 
-    # seq_len = contexto del modelo (block_size en config)
-    seq_len = config.block_size
+    # Contexto máximo del modelo
+    seq_len = config.max_seq_len
     print(f"[INFO] Usando seq_len = {seq_len} para clasificación.")
 
     # -------------------------
@@ -267,7 +343,6 @@ def main():
     # -------------------------
     all_examples = build_toy_examples()
 
-    # Split manual: 75% train, 25% val
     n_total = len(all_examples)
     n_train = int(n_total * 0.75)
     train_examples = all_examples[:n_train]
