@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from src.model.gpt import GPTConfig, GPTModel
+from src.model.gpt import GPTConfig
 from src.model.classification import GPTForClassification
 from src.data.datasets import ClassificationDataset, ClassificationExample
 
@@ -228,7 +228,7 @@ def main():
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
     # -------------------------
-    # 2. Reconstruir config + modelo base
+    # 2. Reconstruir config (sin instanciar GPTModel aún)
     # -------------------------
     if isinstance(ckpt, dict) and "config" in ckpt and "model_state_dict" in ckpt:
         # Caso "bonito": guardamos config + pesos del modelo
@@ -238,7 +238,7 @@ def main():
         config = GPTConfig(**config_dict)
 
     elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        # Tu caso actual: checkpoint de entrenamiento con varios campos
+        # Caso de entrenamiento con varios campos (tu caso actual)
         print("[INFO] Checkpoint de entrenamiento detectado (sin 'config').")
         model_state = ckpt["model_state_dict"]
 
@@ -330,13 +330,12 @@ def main():
             dropout=0.1,
         )
 
-    base_model = GPTModel(config)
-    base_model.load_state_dict(model_state)
-    print("[INFO] Modelo base GPT cargado.")
-
     # Contexto máximo del modelo
     seq_len = config.max_seq_len
     print(f"[INFO] Usando seq_len = {seq_len} para clasificación.")
+    print("[INFO] Config reconstruida; GPTForClassification se inicializará con esta config.")
+    # NOTA: por ahora NO cargamos model_state en GPTForClassification.
+    # En una versión 2 podremos mapear model_state al backbone interno del modelo.
 
     # -------------------------
     # 3. Construir dataset de clasificación (toy)
@@ -368,8 +367,9 @@ def main():
     # -------------------------
     # 4. Crear GPTForClassification y optimizador
     # -------------------------
-    model = GPTForClassification(base_model=base_model, num_classes=args.num_classes)
+    model = GPTForClassification(config, args.num_classes)
     model.to(device)
+    print("[INFO] GPTForClassification creado (sin cargar pesos del pretraining de momento).")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
