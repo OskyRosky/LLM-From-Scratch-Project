@@ -389,6 +389,21 @@ def main():
             f"val_acc={val_acc:.4f}"
         )
 
+    # -------------------------
+    # 6. Guardar modelo finetuneado
+    # -------------------------
+    save_path = os.path.join(args.ckpt_dir, "gpt_char_cls_toy.pt")
+    torch.save(
+        {
+            "config": config.__dict__,
+            "model_state_dict": model.state_dict(),
+            "num_classes": args.num_classes,
+            "stoi": stoi,
+        },
+        save_path,
+    )
+    print(f"[INFO] Modelo de clasificación guardado en: {save_path}")
+
     print("\n[INFO] Finetuning de clasificación completado.")
 
 

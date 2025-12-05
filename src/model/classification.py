@@ -6,16 +6,16 @@ from src.model.gpt import GPTModel, GPTConfig
 
 class ClassificationHead(nn.Module):
     """
-    Capa final de clasificación: toma un vector de tamaño d_model
-    y lo proyecta a num_classes.
+    Capa final de clasificación: toma un vector de tamaño `in_dim`
+    (en esta versión: vocab_size) y lo proyecta a `num_classes`.
     """
 
-    def __init__(self, d_model: int, num_classes: int):
+    def __init__(self, in_dim: int, num_classes: int):
         super().__init__()
-        self.linear = nn.Linear(d_model, num_classes)
+        self.linear = nn.Linear(in_dim, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, d_model)
+        # x: (B, in_dim)
         return self.linear(x)  # (B, num_classes)
 
 
@@ -23,9 +23,12 @@ class GPTForClassification(nn.Module):
     """
     Modelo GPT + cabeza de clasificación sencilla.
 
+    En esta versión:
+
     - Usa GPTModel como backbone.
-    - Toma la representación del ÚLTIMO token de la secuencia.
-    - Pasa ese vector por un ClassificationHead (lineal).
+    - Toma los LOGITS de LM del ÚLTIMO token de la secuencia.
+    - Los trata como un vector de features de tamaño vocab_size.
+    - Los pasa por una capa lineal hacia num_classes.
     """
 
     def __init__(self, config: GPTConfig, num_classes: int):
@@ -36,8 +39,13 @@ class GPTForClassification(nn.Module):
         # Backbone GPT
         self.gpt = GPTModel(config)
 
+        # En tu implementación actual, GPTModel devuelve logits de vocabulario
+        # de tamaño vocab_size. Así que la última dimensión de logits_lm es
+        # precisamente config.vocab_size.
+        in_dim = config.vocab_size
+
         # Cabeza de clasificación
-        self.classifier = ClassificationHead(d_model=config.d_model,
+        self.classifier = ClassificationHead(in_dim=in_dim,
                                              num_classes=num_classes)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -61,14 +69,8 @@ class GPTForClassification(nn.Module):
 
         # logits_lm: (B, T, vocab_size)
         # Tomamos la última posición temporal T-1 para cada ejemplo.
-        # Esto equivale a usar el "último token" como resumen de la secuencia.
-        last_hidden = logits_lm[:, -1, :]  # (B, vocab_size) si el GPT devuelve logits directos
+        last_token_logits = logits_lm[:, -1, :]  # (B, vocab_size)
 
-        # OJO: en el libro de Raschka normalmente se usa el último HIDDEN STATE,
-        # pero aquí nuestro GPTModel devuelve logits de vocabulario.
-        # Para mantenerlo simple en esta versión, tratamos esos logits como features.
-        # En una versión 2, podríamos modificar GPTModel para devolver hidden states
-        # y aquí usar esos en lugar de logits_lm.
-
-        logits_cls = self.classifier(last_hidden)  # (B, num_classes)
+        # Estos logits los usamos como features para la clasificación.
+        logits_cls = self.classifier(last_token_logits)  # (B, num_classes)
         return logits_cls
