@@ -1,116 +1,83 @@
 # src/inference/instructions_chat.py
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
-from typing import Dict, Tuple, List
+from typing import Dict, Any, List
 
 import torch
 from torch import nn
 
 from src.model.gpt import GPTConfig, GPTModel
+from src.cli.finetune_classification import CharTokenizerFromState
 
 
-# ---------------------------------------------------------------------
-# Utilidad de dispositivo
-# ---------------------------------------------------------------------
-def get_device(device_str: str) -> torch.device:
-    device_str = device_str.lower()
-    if device_str == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            return torch.device("mps")
-        else:
-            return torch.device("cpu")
-    elif device_str == "cuda":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    elif device_str == "mps":
-        return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    else:
-        return torch.device("cpu")
-
-
-# ---------------------------------------------------------------------
-# Tokenizer simple a partir de stoi guardado
-# ---------------------------------------------------------------------
-class CharTokenizerFromState:
-    """
-    Wrapper mínimo alrededor de stoi para:
-      - encode(text) -> List[int]
-      - decode(List[int]) -> str
-
-    Asume que stoi es un diccionario {token(str) -> id(int)}.
-    En tu caso, son caracteres + algunos tokens especiales ("<PAD>", etc.).
-    """
-
-    def __init__(self, stoi: Dict[str, int]):
-        self.stoi = stoi
-        # itos: inverso de stoi
-        self.itos = {idx: ch for ch, idx in stoi.items()}
-
-        # ID por defecto para caracteres desconocidos
-        # (si existe "<unk>", lo usamos; si no, tomamos el primer id)
-        self.default_id = self.stoi.get("<unk>", next(iter(self.stoi.values())))
-
-    def encode(self, text: str) -> List[int]:
-        """
-        Convierte texto en lista de IDs.
-        Si un carácter no está en stoi, usa default_id.
-        """
-        return [self.stoi.get(ch, self.default_id) for ch in text]
-
-    def decode(self, ids: List[int]) -> str:
-        """
-        Convierte lista de IDs en texto.
-        Si un id no está en itos, lo reemplaza por "?".
-        """
-        chars = [self.itos.get(i, "?") for i in ids]
-        return "".join(chars)
-
-
-# ---------------------------------------------------------------------
-# Carga del modelo de instrucciones
-# ---------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Dataclass para agrupar todo lo necesario del modelo
+# -------------------------------------------------------------------
 @dataclass
 class InstructionsModelBundle:
-    """
-    Contenedor para todo lo que necesitamos en inferencia.
-    """
-    model: GPTModel
-    tokenizer: CharTokenizerFromState
+    model: nn.Module
+    tokenizer: Any
     config: GPTConfig
     device: torch.device
 
 
+# -------------------------------------------------------------------
+# Helpers de dispositivo
+# -------------------------------------------------------------------
+def get_device(device_str: str) -> torch.device:
+    """
+    Convierte un string ('cpu', 'mps', 'cuda') en torch.device.
+    Siempre espera un string, nunca un torch.device.
+    """
+    if device_str is None:
+        return torch.device("cpu")
+
+    s = str(device_str).lower()
+    if s.startswith("cuda") and torch.cuda.is_available():
+        return torch.device(s)
+    if s == "mps" and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+# -------------------------------------------------------------------
+# Carga del modelo de instrucciones
+# -------------------------------------------------------------------
 def load_instructions_model(
-    ckpt_dir: str = "models/checkpoints_oscar_long",
-    device_str: str = "auto",
+    ckpt_dir: str,
+    device_str: str = "cpu",
 ) -> InstructionsModelBundle:
     """
-    Carga el modelo de instrucciones (gpt_char_instructions.pt)
-    + tokenizer (desde el propio checkpoint) y devuelve un bundle
-    listo para usar en inferencia.
+    Carga el checkpoint de instrucciones gpt_char_instructions.pt
+    ubicado dentro de ckpt_dir.
     """
-    device = get_device(device_str)
-
     ckpt_path = os.path.join(ckpt_dir, "gpt_char_instructions.pt")
-    if not os.path.isfile(ckpt_path):
-        raise FileNotFoundError(f"No se encontró el checkpoint de instrucciones en: {ckpt_path}")
+
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            f"No se encontró el checkpoint de instrucciones en: {ckpt_path}"
+        )
 
     print(f"[INFO] Cargando modelo de instrucciones desde: {ckpt_path}")
-    obj = torch.load(ckpt_path, map_location="cpu")
 
-    # Extraer config, pesos y vocabulario
+    obj: Dict[str, Any] = torch.load(ckpt_path, map_location="cpu")
+
     config_dict = obj["config"]
     state_dict = obj["model_state_dict"]
     stoi = obj["stoi"]
 
+    # Reconstruir config y tokenizer
     config = GPTConfig(**config_dict)
     tokenizer = CharTokenizerFromState(stoi)
 
     # Instanciar modelo y cargar pesos
     model = GPTModel(config)
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict)
+
+    device = get_device(device_str)
     model.to(device)
     model.eval()
 
@@ -122,106 +89,109 @@ def load_instructions_model(
     )
 
 
-# ---------------------------------------------------------------------
-# Construcción de prompt y generación
-# ---------------------------------------------------------------------
-def build_prompt(question: str) -> str:
+# -------------------------------------------------------------------
+# Helpers de prompt / codificación
+# -------------------------------------------------------------------
+def build_prompt(user_prompt: str) -> str:
     """
-    Construye el prompt para instruction tuning.
+    Construye el texto de entrada estilo instruction-tuning:
+        "<instr> {user_prompt}\n<resp> "
     """
-    return f"<instr> {question}\n<resp> "
+    return f"<instr> {user_prompt}\n<resp> "
 
 
 def encode_prompt(
     text: str,
-    tokenizer: CharTokenizerFromState,
+    tokenizer: Any,
     seq_len: int,
-    device: torch.device,
 ) -> torch.Tensor:
     """
-    Codifica el prompt a ids, trunca/paddea a seq_len y lo pone en device.
+    Tokeniza y ajusta a longitud fija seq_len (truncado + padding con 0).
+    Devuelve tensor (1, T).
     """
-    ids = tokenizer.encode(text)
+    ids: List[int] = tokenizer.encode(text)
     ids = ids[:seq_len]
-
     if len(ids) < seq_len:
         ids = ids + [0] * (seq_len - len(ids))
-
-    input_ids = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
-    return input_ids  # (1, T)
+    return torch.tensor(ids, dtype=torch.long).unsqueeze(0)
 
 
-def postprocess_generated_text(
-    generated: str,
-    resp_token: str = "<resp>",
-    pad_token: str = "<PAD>",
+def decode_ids(
+    ids: List[int],
+    tokenizer: Any,
 ) -> str:
     """
-    Toma el texto completo generado (incluye prompt + respuesta),
-    corta lo que viene después de <resp> y limpia tokens <PAD>.
+    Decodifica una lista de IDs a texto usando tokenizer.stoi.
+    No usamos tokenizer.decode porque no existe en CharTokenizerFromState.
     """
-    if resp_token in generated:
-        after_resp = generated.split(resp_token, 1)[1]
-    else:
-        after_resp = generated
+    # Construimos itos a partir de stoi
+    itos = {i: ch for ch, i in tokenizer.stoi.items()}
 
-    # Limpiar <PAD> y espacios extra
-    cleaned = after_resp.replace(pad_token, "")
-    return cleaned.strip()
+    chars: List[str] = []
+    for idx in ids:
+        ch = itos.get(int(idx), "")
+        # opcional: ignorar padding si usamos "<pad>"
+        if ch == "<pad>":
+            continue
+        chars.append(ch)
+
+    return "".join(chars)
 
 
+# -------------------------------------------------------------------
+# Generación de respuesta
+# -------------------------------------------------------------------
 def generate_answer(
-    question: str,
     bundle: InstructionsModelBundle,
+    user_prompt: str,
     max_new_tokens: int = 80,
     temperature: float = 0.7,
-    top_k: int = None,
-) -> Tuple[str, str]:
+) -> str:
     """
-    Genera una respuesta para la pregunta dada.
+    Genera una respuesta de texto dado un prompt de usuario.
 
-    Devuelve:
-      - full_text: el texto completo (prompt + lo generado)
-      - answer_only: solo la parte después de <resp>, limpia.
+    Este es el método que llama Streamlit.
     """
     model = bundle.model
     tokenizer = bundle.tokenizer
     config = bundle.config
     device = bundle.device
 
-    # 1. Construir prompt
-    prompt_text = build_prompt(question)
+    # 1) Construir prompt completo
+    prompt_text = build_prompt(user_prompt)
 
-    # 2. Codificar
-    inp = encode_prompt(prompt_text, tokenizer, config.max_seq_len, device)
+    # 2) Codificar
+    inp = encode_prompt(prompt_text, tokenizer, config.max_seq_len).to(device)
 
-    # 3. Generar
+    # 3) Generar
     with torch.no_grad():
         out_ids = model.generate(
             inp,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            top_k=top_k,
+            top_k=None,
         )
 
-    # 4. Decodificar
-    full_text = tokenizer.decode(out_ids[0].tolist())
+    decoded = decode_ids(out_ids[0].tolist(), tokenizer)
 
-    # 5. Post-procesar para obtener solo la respuesta
-    answer_only = postprocess_generated_text(full_text)
+    # 4) Intentar separar lo que viene después de <resp>
+    split_tok = "<resp>"
+    if split_tok in decoded:
+        after_resp = decoded.split(split_tok, 1)[1]
+        answer = after_resp.strip()
+    else:
+        # fallback: devolvemos todo el texto generado
+        answer = decoded
 
-    return full_text, answer_only
+    return answer
 
 
-# ---------------------------------------------------------------------
-# Pequeño main de prueba desde terminal:
-#   python -m src.inference.instructions_chat
-# ---------------------------------------------------------------------
-def main():
-    bundle = load_instructions_model(
-        ckpt_dir="models/checkpoints_oscar_long",
-        device_str="auto",
-    )
+# -------------------------------------------------------------------
+# Pequeño test manual desde la terminal
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    ckpt_dir = "models/checkpoints_oscar_long"
+    bundle = load_instructions_model(ckpt_dir, device_str="cpu")
 
     questions = [
         "Un perro es un canino?",
@@ -230,15 +200,8 @@ def main():
     ]
 
     for q in questions:
-        full, ans = generate_answer(q, bundle, max_new_tokens=80, temperature=0.7)
-
-        print("\n" + "=" * 60)
+        ans = generate_answer(bundle, user_prompt=q, max_new_tokens=80, temperature=0.7)
+        print("\n====================================================")
         print("Pregunta:", q)
-        print("\n[Texto completo generado]:")
-        print(repr(full))
-        print("\n[Solo respuesta procesada]:")
+        print("Respuesta del modelo:")
         print(repr(ans))
-
-
-if __name__ == "__main__":
-    main()
