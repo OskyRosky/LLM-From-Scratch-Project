@@ -35,13 +35,15 @@ st.set_page_config(
 def get_model_bundle(device_str: str = "mps") -> InstructionsModelBundle:
     """
     Carga el modelo de instrucciones y lo cachea.
-    OJO: aquí pasamos device_str como string, no un torch.device.
+    OJO: aquí pasamos device_str como string, no un torch.device,
+    y pasamos el DIRECTORIO donde está el checkpoint.
     """
-    ckpt_path = "models/checkpoints_oscar_long/gpt_char_instructions.pt"
+    # 👈 IMPORTANTE: aquí va el directorio, no el archivo .pt
+    ckpt_dir = "models/checkpoints_oscar_long"
 
     st.write(f"[DEBUG] Cargando modelo en dispositivo: {device_str}")
-    # load_instructions_model espera (ckpt_path: str, device_str: str)
-    bundle = load_instructions_model(ckpt_path, device_str=device_str)
+    # load_instructions_model espera (ckpt_dir: str, device_str: str)
+    bundle = load_instructions_model(ckpt_dir, device_str=device_str)
     return bundle
 
 
