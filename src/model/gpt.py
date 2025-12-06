@@ -89,7 +89,8 @@ class GPTModel(nn.Module):
         self,
         input_ids: Tensor,          # (batch_size, seq_len)
         return_attn: bool = False,
-    ) -> Tuple[Tensor, Optional[List[Tensor]]]:
+        return_hidden: bool = False,
+    ):
         """
         Forward del GPT.
 
@@ -98,16 +99,23 @@ class GPTModel(nn.Module):
         input_ids:
             Tensor de enteros (batch_size, seq_len) con índices de tokens.
         return_attn:
-            Si True, devuelve también una lista con los mapas de atención
-            de cada bloque.
+            Si True y return_hidden=False, devuelve también la lista de mapas de atención.
+        return_hidden:
+            Si True, devuelve también las hidden states finales (después de ln_f).
 
         Returns
         -------
-        logits:
-            Tensor de forma (batch_size, seq_len, vocab_size)
-        all_attn (opcional):
-            Lista de tensores de forma (batch_size, n_heads, seq_len, seq_len),
-            uno por cada bloque Transformer, o None si return_attn=False.
+        Casos:
+        - Si return_hidden=True:
+            (logits, hidden)
+            logits: (B, T, vocab_size)
+            hidden: (B, T, d_model)
+        - Si return_hidden=False y return_attn=True:
+            (logits, all_attn)
+            logits: (B, T, vocab_size)
+            all_attn: lista de tensores (B, n_heads, T, T)
+        - Si ambos False (caso por defecto):
+            logits: (B, T, vocab_size)
         """
         batch_size, seq_len = input_ids.shape
 
@@ -119,29 +127,38 @@ class GPTModel(nn.Module):
         device = input_ids.device
 
         # Embeddings
-        tok_emb = self.tok_embedding(input_ids)       # (B, T, d_model)
-        pos_emb = self.pos_embedding(input_ids)       # (B, T, d_model)
+        tok_emb = self.tok_embedding(input_ids)  # (B, T, d_model)
+        pos_emb = self.pos_embedding(input_ids)  # (B, T, d_model)
         x = tok_emb + pos_emb
         x = self.dropout(x)
 
         # Máscara causal compartida por todos los bloques
         mask = create_causal_mask(seq_len, device=device)
 
-        all_attn: Optional[List[Tensor]] = [] if return_attn else None
+        all_attn: Optional[List[Tensor]] = [] if return_attn and not return_hidden else None
 
         # Pasar por los bloques Transformer
         for block in self.blocks:
-            x, attn = block(x, mask=mask, return_attn=return_attn)
-            if return_attn and all_attn is not None:
+            x, attn = block(x, mask=mask, return_attn=return_attn and not return_hidden)
+            if return_attn and not return_hidden and all_attn is not None:
                 all_attn.append(attn)
 
         # LayerNorm final
-        x = self.ln_f(x)
+        hidden = self.ln_f(x)  # (B, T, d_model)
 
         # Logits a vocabulario
-        logits = self.lm_head(x)  # (B, T, vocab_size)
+        logits = self.lm_head(hidden)  # (B, T, vocab_size)
 
-        return logits, all_attn
+        # Priorizamos el uso en clasificación: hidden states
+        if return_hidden:
+            return logits, hidden
+
+        # Compatibilidad con uso anterior de atención
+        if return_attn:
+            return logits, all_attn
+
+        # Caso simple: solo logits
+        return logits
 
     @torch.no_grad()
     def generate(
@@ -185,8 +202,8 @@ class GPTModel(nn.Module):
 
             # Forward: obtenemos logits para todos los pasos,
             # nos interesa solo el último token
-            logits, _ = self(context)
-            logits = logits[:, -1, :]  # (batch_size, vocab_size)
+            logits = self(context)          # ahora forward devuelve solo logits
+            logits = logits[:, -1, :]       # (batch_size, vocab_size)
 
             if temperature > 0.0:
                 logits = logits / temperature
