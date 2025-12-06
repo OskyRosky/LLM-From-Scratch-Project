@@ -1,3 +1,5 @@
+# src/cli/finetune_classification.py
+
 import argparse
 import os
 from typing import List
@@ -6,7 +8,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from src.model.gpt import GPTConfig
+from src.model.gpt import GPTConfig, GPTModel
 from src.model.classification import GPTForClassification
 from src.data.datasets import ClassificationDataset, ClassificationExample
 
@@ -201,6 +203,18 @@ def main():
         default=5e-5,
         help="Learning rate.",
     )
+    parser.add_argument(
+        "--freeze-backbone",
+        action="store_true",
+        help="Si se establece, congela el backbone GPT y entrena solo la cabeza de clasificación.",
+    )
+    parser.add_argument(
+        "--pooling",
+        type=str,
+        default="mean",
+        choices=["mean", "cls"],
+        help="Tipo de pooling sobre las hidden states (mean|cls).",
+    )
 
     args = parser.parse_args()
 
@@ -228,23 +242,19 @@ def main():
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
     # -------------------------
-    # 2. Reconstruir config (sin instanciar GPTModel aún)
+    # 2. Reconstruir config + extraer model_state
     # -------------------------
     if isinstance(ckpt, dict) and "config" in ckpt and "model_state_dict" in ckpt:
-        # Caso "bonito": guardamos config + pesos del modelo
         print("[INFO] Checkpoint con 'config' y 'model_state_dict' detectado.")
         config_dict = ckpt["config"]
         model_state = ckpt["model_state_dict"]
         config = GPTConfig(**config_dict)
 
     elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        # Caso de entrenamiento con varios campos (tu caso actual)
         print("[INFO] Checkpoint de entrenamiento detectado (sin 'config').")
         model_state = ckpt["model_state_dict"]
 
-        # Intentamos recuperar la config desde training_config si existe
         training_cfg = ckpt.get("training_config", None)
-
         tc = {}
         if training_cfg is not None:
             if hasattr(training_cfg, "__dict__"):
@@ -252,14 +262,12 @@ def main():
             elif isinstance(training_cfg, dict):
                 tc = training_cfg
 
-        # Valores por defecto, que sobreescribiremos con lo que podamos leer
         d_model = tc.get("d_model", 256)
         n_heads = tc.get("n_heads", 4)
         n_layers = tc.get("n_layers", 4)
         dropout = tc.get("dropout", 0.1)
         max_seq_len = tc.get("seq_len") or tc.get("max_seq_len") or 256
 
-        # Ajustamos con las shapes reales de los pesos (más robusto)
         we = model_state.get("tok_embedding.embedding.weight", None)
         if we is not None:
             vocab_size = we.shape[0]
@@ -269,7 +277,6 @@ def main():
         if pe is not None:
             max_seq_len = pe.shape[0]
 
-        # Número de capas a partir de los nombres de los bloques
         layer_ids = {
             int(k.split(".")[1])
             for k in model_state.keys()
@@ -294,7 +301,6 @@ def main():
         )
 
     else:
-        # Caso en que el checkpoint sea directamente un state_dict puro del modelo
         print("[INFO] Checkpoint es un state_dict puro del modelo.")
         model_state = ckpt
 
@@ -312,7 +318,6 @@ def main():
         }
         n_layers = max(layer_ids) + 1 if layer_ids else 0
 
-        # Heurística razonable para n_heads
         n_heads = 4 if d_model % 4 == 0 else 1
 
         print(
@@ -330,12 +335,9 @@ def main():
             dropout=0.1,
         )
 
-    # Contexto máximo del modelo
     seq_len = config.max_seq_len
     print(f"[INFO] Usando seq_len = {seq_len} para clasificación.")
-    print("[INFO] Config reconstruida; GPTForClassification se inicializará con esta config.")
-    # NOTA: por ahora NO cargamos model_state en GPTForClassification.
-    # En una versión 2 podremos mapear model_state al backbone interno del modelo.
+    print("[INFO] Config reconstruida; se usará como backbone preentrenado.")
 
     # -------------------------
     # 3. Construir dataset de clasificación (toy)
@@ -365,11 +367,24 @@ def main():
     print(f"[INFO] Tamaño val:   {len(val_dataset)} ejemplos")
 
     # -------------------------
-    # 4. Crear GPTForClassification y optimizador
+    # 4. Crear backbone GPT preentrenado y modelo de clasificación
     # -------------------------
-    model = GPTForClassification(config, args.num_classes)
+    print("[INFO] Instanciando backbone GPTModel y cargando pesos de pretraining...")
+    backbone = GPTModel(config)
+    backbone.load_state_dict(model_state)
+    print("[INFO] Backbone GPTModel cargado correctamente con pesos del pretraining.")
+
+    print("[INFO] Instanciando GPTForClassification y copiando el backbone...")
+    model = GPTForClassification(config, num_classes=args.num_classes, pooling=args.pooling)
+    model.gpt.load_state_dict(backbone.state_dict())
+    print("[INFO] Pesos del backbone copiados a model.gpt.")
+
+    if args.freeze_backbone:
+        for p in model.gpt.parameters():
+            p.requires_grad = False
+        print("[INFO] Backbone congelado: solo se entrenará la cabeza de clasificación.")
+
     model.to(device)
-    print("[INFO] GPTForClassification creado (sin cargar pesos del pretraining de momento).")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
@@ -392,7 +407,7 @@ def main():
     # -------------------------
     # 6. Guardar modelo finetuneado
     # -------------------------
-    save_path = os.path.join(args.ckpt_dir, "gpt_char_cls_toy.pt")
+    save_path = os.path.join(args.ckpt_dir, "gpt_char_cls_toy_v2.pt")
     torch.save(
         {
             "config": config.__dict__,
