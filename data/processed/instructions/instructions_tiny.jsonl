@@ -1,0 +1,8 @@
+{"prompt": "Un perro es un canino?", "response": "Así es. Un perro es un canino, es decir, pertenece a la familia de los cánidos."}
+{"prompt": "Qué es un modelo de lenguaje?", "response": "Un modelo de lenguaje es un sistema que aprende patrones del texto y predice la siguiente palabra o token dado un contexto."}
+{"prompt": "Explica en una frase qué es el aprendizaje supervisado.", "response": "El aprendizaje supervisado consiste en entrenar un modelo con ejemplos de entrada y salida conocidas para que aprenda a predecir la salida correcta en nuevos casos."}
+{"prompt": "Qué es Python?", "response": "Python es un lenguaje de programación de alto nivel, muy utilizado en ciencia de datos, inteligencia artificial y desarrollo de software en general."}
+{"prompt": "Dime una ventaja de usar redes neuronales profundas.", "response": "Una ventaja de las redes neuronales profundas es que pueden aprender representaciones complejas y jerárquicas de los datos de forma automática."}
+{"prompt": "Por qué es importante fijar la semilla aleatoria en experimentos?", "response": "Es importante fijar la semilla aleatoria para poder reproducir los resultados de los experimentos y comparar modelos de forma justa."}
+{"prompt": "Qué es una GPU?", "response": "Una GPU es una unidad de procesamiento gráfico que acelera operaciones en paralelo, muy útil para entrenar modelos de deep learning."}
+{"prompt": "Qué es el overfitting?", "response": "El overfitting ocurre cuando un modelo se ajusta demasiado a los datos de entrenamiento y pierde capacidad de generalizar a datos nuevos."}
