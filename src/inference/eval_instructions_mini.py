@@ -4,7 +4,7 @@
 Pequeño script de evaluación para el modelo de instrucciones.
 
 Objetivo:
-- Cargar el checkpoint de instrucciones desde el directorio:
+- Cargar el checkpoint de instrucciones desde:
     models/checkpoints_oscar_long
 - Hacerle unas pocas preguntas fijas:
     - "Un perro es un canino?"
@@ -16,7 +16,7 @@ Se apoya en las funciones ya definidas en:
     src.inference.instructions_chat
 """
 
-from typing import List
+from typing import List, Tuple, Union
 
 from src.inference.instructions_chat import (
     load_instructions_model,
@@ -40,7 +40,6 @@ def run_eval(
       no la ruta completa al archivo.
     """
     print("[INFO] Cargando modelo de instrucciones para evaluación...")
-    # 👉 Aquí pasamos el directorio, tal como espera load_instructions_model
     bundle: InstructionsModelBundle = load_instructions_model(
         ckpt_dir,
         device_str=device_str,
@@ -53,15 +52,26 @@ def run_eval(
         print("\n-----------------------------------------------------")
         print("Pregunta:", q)
 
-        answer, raw_text = generate_answer(
-            bundle=bundle,
-            question=q,
+        # Llamamos con argumentos POSICIONALES para el prompt
+        result: Union[str, Tuple[str, str]] = generate_answer(
+            bundle,          # 1er argumento: bundle
+            q,               # 2do argumento: texto/prompt (posicional)
             max_new_tokens=max_new_tokens,
             temperature=temperature,  # 0.0 = súper determinista
         )
 
-        print("\n[Texto generado completo]:")
-        print(repr(raw_text))
+        # Soportar ambas formas de retorno:
+        # - str
+        # - (answer, raw_text)
+        if isinstance(result, tuple) and len(result) == 2:
+            answer, raw_text = result
+        else:
+            answer = result
+            raw_text = None
+
+        if raw_text is not None:
+            print("\n[Texto generado completo]:")
+            print(repr(raw_text))
 
         print("\n[Respuesta procesada]:")
         print(answer)
