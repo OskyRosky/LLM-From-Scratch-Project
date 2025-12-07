@@ -169,10 +169,78 @@ This folder connects research to a real UI.
 
 # 2. Working with Text Data: Tokenization & Dataset Preparation.
 
+Before building any language model—from the smallest educational prototype to a large-scale LLM—the first challenge is always the same: how to represent text in a way a model can understand.
+
+Version 1 of this project intentionally uses a character-level tokenizer. This is not how modern LLMs operate, but it is the simplest and most transparent way to understand the foundations of autoregressive modeling.
+
+## 2.1 Why Character-Level Tokenization?
+
+For an instructional project, character-level tokenization offers several advantages:
+
+	•	There is no vocabulary to maintain; every visible character becomes a token.
+	•	The model never encounters unknown words; it learns to construct them from letters.
+	•	The tokenizer is trivial to implement and completely transparent.
+	•	It allows you to focus on the mechanics of transformers without relying on external tooling.
+
+Of course, character modeling has limitations: longer sequences, slower convergence, and weaker semantic structure. But it is ideal for understanding how a GPT learns from raw text.
+
+## 2.2 Building the Vocabulary
+
+During preprocessing, the system scans the corpus and extracts every unique character.
+Each character is mapped to an integer, forming the vocabulary the model uses.
+
+Alongside the natural characters, several special tokens are added:
+
+	•	a padding token for aligning sequences,
+	•	a token for unknown characters,
+	•	markers used during instruction tuning (e.g., one to start the instruction and another to start the response).
+
+These special markers allow the same GPT backbone to support pretraining, classification, and instruction-following tasks using a unified token space.
+
+## 2.3 Turning Text Into Model-Ready Sequences
+
+Once the vocabulary exists, every dataset follows the same pipeline:
+	1.	Text is converted into a sequence of numerical IDs.
+	2.	Sequences are padded or truncated to a fixed maximum length.
+	3.	Batches are constructed so the model always receives uniform tensors.
+
+This ensures stability during training and mirrors the requirements of real transformer implementations.
 
 
+## 2.4
 
-# 3. Coding Attention Mechanisms.
+The backbone GPT is trained using the classic next-token prediction task.
+For character-level models, this means predicting the next character in the sequence.
+
+This stage teaches the model:
+	•	how text flows,
+	•	how characters relate to each other,
+	•	how structure emerges from sequential prediction.
+
+Even a tiny model learns patterns such as word boundaries, punctuation, and common character combinations.
+
+## 2.5 Instruction Dataset
+
+For instruction tuning, the data uses simple prompt-response pairs.
+Each one is rewritten internally into a structured format that clearly separates:
+	•	the instruction,
+	•	the model’s expected response.
+
+This structure helps the small GPT backbone transition from “predict the next character” to “follow a command,” even with minimal data.
+
+
+## 2.6 Summary
+
+This stage lays the groundwork for everything that follows:
+	•	A clean and interpretable vocabulary.
+	•	A transparent tokenization strategy.
+	•	Unified datasets for pretraining, classification, and instruction tuning.
+	•	A clear structure for instruction-style interactions.
+
+Even though later versions of the project will shift toward modern tokenization approaches (BPE or WordPiece), V1 deliberately stays simple so every step is visible and understandable.
+
+
+# 3. Coding attention mechanisms.
 
 # 4. GPT Model.
 
