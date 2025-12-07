@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Any, Optional
-
 import os
+
 import torch
 
 from src.model.gpt import GPTModel, GPTConfig
@@ -41,7 +41,6 @@ class CharTokenizerForInstructions:
 
     def __init__(self, stoi: Dict[str, int]):
         self.stoi: Dict[str, int] = stoi
-        # inversa
         self.itos: Dict[int, str] = {v: k for k, v in stoi.items()}
         # ID de padding (si no existe, 0)
         self.pad_id: int = self.stoi.get("<PAD>", self.stoi.get("<pad>", 0))
@@ -86,7 +85,7 @@ def _select_device(device_str: str) -> torch.device:
 
 # ---------------------------------------------------------------------
 # Carga del modelo de instrucciones desde el checkpoint
-#   ✅ acepta ckpt_dir o ckpt_path para no romper nada
+#   ✅ acepta ckpt_dir o ckpt_path
 # ---------------------------------------------------------------------
 
 
@@ -98,21 +97,13 @@ def load_instructions_model(
     """
     Carga el modelo fine-tuneado para instrucciones.
 
-    Soporta dos formas de llamarse:
-
-      1) Solo con ckpt_dir:
-            load_instructions_model("models/checkpoints_oscar_long", device_str="mps")
-
-         → Usa: {ckpt_dir}/gpt_char_instructions.pt
-
-      2) Con ckpt_path explícito:
-            load_instructions_model(ckpt_path="models/checkpoints_oscar_long/gpt_char_instructions.pt")
-
-    Esto evita errores de "unexpected keyword argument".
+    Formas de uso:
+      - load_instructions_model(ckpt_dir="models/checkpoints_oscar_long", device_str="mps")
+      - load_instructions_model(ckpt_path="models/checkpoints_oscar_long/gpt_char_instructions.pt")
     """
     device = _select_device(device_str)
 
-    # Resolver ruta final al checkpoint
+    # Resolver ruta al checkpoint
     if ckpt_path is None:
         if ckpt_dir is None:
             raise ValueError(
@@ -180,8 +171,6 @@ def generate_answer(
     Construye un contexto de la forma:
         "<instr> {prompt}\\n<resp>"
 
-    y luego autoregresa caracteres.
-
     Devuelve:
       - answer_text: solo el texto posterior a <resp>, sin <PAD>/<pad>.
       - full_text: todo el texto generado (incluyendo prefijos).
@@ -190,10 +179,15 @@ def generate_answer(
     tokenizer = bundle.tokenizer
     device = bundle.device
     pad_id = bundle.pad_id
+    max_ctx = bundle.config.max_seq_len
 
-    # Construir prompt con los prefijos usados en el dataset
+    # 1) Construir prompt con los prefijos usados en el dataset
     prompt_text = f"<instr> {prompt}\n<resp>"
     input_ids = tokenizer.encode(prompt_text)
+
+    # 🔒 Asegurar que el contexto inicial no exceda max_seq_len
+    if len(input_ids) > max_ctx:
+        input_ids = input_ids[-max_ctx:]
 
     input_tensor = torch.tensor(
         input_ids,
@@ -203,11 +197,14 @@ def generate_answer(
 
     generated = input_tensor
 
+    # 2) Bucle de generación con ventana deslizante
     for _ in range(max_new_tokens):
-        # logits: (1, T, vocab_size)
-        logits = model(generated)
-        # Último paso de tiempo
-        logits_last = logits[:, -1, :]  # (1, vocab_size)
+        # Mantener solo la última ventana de contexto
+        if generated.size(1) > max_ctx:
+            generated = generated[:, -max_ctx:]
+
+        logits = model(generated)           # (1, T, V)
+        logits_last = logits[:, -1, :]      # (1, V)
 
         # Prohibir que el modelo escoja el token PAD
         if pad_id is not None:
@@ -218,11 +215,11 @@ def generate_answer(
             next_token = torch.argmax(logits_last, dim=-1, keepdim=True)  # (1, 1)
         else:
             probs = torch.softmax(logits_last / temperature, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)  # (1, 1)
+            next_token = torch.multinomial(probs, num_samples=1)          # (1, 1)
 
         generated = torch.cat([generated, next_token], dim=1)
 
-    # Decodificar todo
+    # 3) Decodificar todo
     full_ids = generated[0].tolist()
     full_text = tokenizer.decode(full_ids)
 
@@ -256,7 +253,12 @@ if __name__ == "__main__":
         "Cuál es la capital de Costa Rica?",
     ]
     for q in qs:
-        ans, full = generate_answer(bundle, prompt=q, max_new_tokens=80, temperature=0.0)
+        ans, full = generate_answer(
+            bundle,
+            prompt=q,
+            max_new_tokens=80,
+            temperature=0.0,
+        )
         print("\n=======================================")
         print("Pregunta:", q)
         print("Full:", repr(full))

@@ -17,6 +17,8 @@ from src.inference.instructions_chat import (  # noqa: E402
     generate_answer,
     InstructionsModelBundle,
 )
+from src.inference.faq_fallback import faq_match  # noqa: E402
+
 
 # ---------------------------------------------------------------------
 # Configuración básica de la página
@@ -117,15 +119,25 @@ if st.button("Generar respuesta"):
     if not prompt.strip():
         st.warning("Por favor escribe una instrucción o pregunta.")
     else:
-        with st.spinner("Cargando modelo (si es la primera vez) y generando respuesta..."):
-            bundle = get_model_bundle(device_str="mps")
+        with st.spinner("Generando respuesta..."):
+            # 1) Intentar primero el fallback perfecto (FAQ)
+            faq_answer = faq_match(prompt)
 
-            answer_text, full_text = generate_answer(
-                bundle=bundle,
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-            )
+            if faq_answer is not None:
+                # Respuesta perfecta, sin usar el modelo
+                answer_text = faq_answer
+                full_text = f"(fallback) {faq_answer}"
+                st.success("✔ Respuesta obtenida vía fallback (respuesta perfecta)")
+            else:
+                # 2) Si no coincide, usamos el modelo tiny
+                bundle = get_model_bundle(device_str="mps")
+
+                answer_text, full_text = generate_answer(
+                    bundle=bundle,
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                )
 
         st.markdown("### 🟢 Respuesta procesada (solo después de `<resp>`)")
         st.write(answer_text)
