@@ -1,0 +1,4 @@
+streamlit>=1.39
+torch>=2.4
+numpy
+pandas
