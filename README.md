@@ -66,9 +66,16 @@ This repository is the outcome of that philosophy. It walks through the entire l
 
 # 1. Basic Infraestructure.
 
-Before training anything, an LLM project must be built on solid infrastructure. Large models are not created by a single script; they emerge from a reproducible environment, a clear project layout, and a modular codebase where each component can evolve independently. The goal of this stage is to establish the foundation on which every later experiment will depend.
+Building an LLM from scratch requires a clean, modular, and scalable codebase. The goal is not only to train a model, but to create an environment where experimentation is safe, reproducible, and easy to extend. This project follows a structure inspired by modern ML engineering practices (NLP labs, production AI teams, and open-source frameworks like nanoGPT, PyTorch Lightning, and HuggingFace).
 
-The first step is defining the structure of the repository itself. A well-organised project separates raw data from processed datasets, model checkpoints from source code, training scripts from inference utilities, and experiments from the application layer. This avoids chaos later, when multiple models, datasets and fine-tuning runs coexist. In this project, the repository is intentionally structured to mirror the workflow of a modern LLM engineering team:
+At its core, the infrastructure is designed around four principles:
+	1.	Separation of concerns — preprocessing logic, model code, training loops, evaluation utilities, and UI demos all live in dedicated modules.
+	2.	Reproducibility — every step (tokenization, sampling, training configuration) is deterministic and version-controlled.
+	3.	Incremental extensibility — the project supports a natural evolution:
+character-level GPT → instruction tuning → UI deployment → word-level GPT (future V2).
+	4.	Ease of experimentation — everything can be run via CLI tools or notebooks, without rewriting boilerplate.
+
+The base directory structure is:
 
 ```Python
 LLM-From-Scratch-Project/
@@ -90,7 +97,80 @@ GPU detection and device routing also form part of the infrastructure layer. The
 
 At this stage, nothing “intelligent” has happened yet—but everything necessary for intelligence to emerge has been prepared. The infrastructure defines how data flows, how models are instantiated, how experiments are executed, and how results are consumed. Without this foundation, even a well-designed architecture would collapse under complexity. With it, the subsequent stages—tokenization, attention mechanisms, GPT blocks, pretraining, and fine-tuning—become coherent parts of a larger, well-engineered system.
 
-# 2. Texto y tokenización (Working with Text Data).
+Environment Setup
+
+The project is fully isolated inside a Python virtual environment:
+
+```Python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+This ensures:
+	•	consistent dependencies,
+	•	clean execution across machines,
+	•	and easy transition into Docker environments (used later for deployment).
+
+Core Components
+
+src/model/
+
+Contains the complete GPT implementation:
+	•	multi-head self-attention
+	•	feedforward blocks
+	•	residual connections
+	•	positional embeddings
+	•	autoregressive masking
+	•	generation utilities
+
+The entire model is written from first principles in pure PyTorch, making it fully transparent and easy to extend.
+
+src/data/
+
+Includes:
+	•	the character-level tokenizer
+	•	dataset loaders (pretraining, classification, and instruction tuning)
+	•	deterministic batching utilities
+
+This abstraction keeps data mechanics independent from model mechanics.
+
+src/finetuning/
+
+Implements:
+	•	masked loss computation
+	•	instruction-tuning objective
+	•	classification head training
+	•	freezing/unfreezing strategies
+
+Each finetuning stage reuses the pretrained GPT backbone.
+
+src/cli/
+
+Command-line tools that orchestrate training:
+
+```Python
+python -m src.cli.pretrain_char
+python -m src.cli.finetune_classification
+python -m src.cli.finetune_instructions
+```
+
+This modularity allows you to re-run individual stages without recomputing everything.
+
+app/
+
+Houses the Streamlit interface that lets users interact with the tiny LLM:
+	•	character-level generation
+	•	instruction-based Q&A
+	•	FAQ fallback mechanism
+	•	model selection (future V2)
+
+This folder connects research to a real UI.
+
+# 2. Working with Text Data: Tokenization & Dataset Preparation.
+
+
+
 
 # 3. Coding Attention Mechanisms.
 
