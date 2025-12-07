@@ -207,7 +207,7 @@ Once the vocabulary exists, every dataset follows the same pipeline:
 This ensures stability during training and mirrors the requirements of real transformer implementations.
 
 
-## 2.4
+## 2.4 Pretraining Dataset
 
 The backbone GPT is trained using the classic next-token prediction task.
 For character-level models, this means predicting the next character in the sequence.
@@ -241,6 +241,107 @@ Even though later versions of the project will shift toward modern tokenization 
 
 
 # 3. Coding attention mechanisms.
+
+Attention is the central innovation that made modern Large Language Models possible.
+In this project, the goal was not just to use attention, but to understand it deeply by implementing it from scratch.
+
+Our Version 1 model uses a minimal and educational version of the attention modules found in a GPT architecture. This helps reveal how transformers truly operate behind the scenes.
+
+## 3.1  Motivation: Why Attention?
+
+Traditional sequence models (RNNs, LSTMs, GRUs) struggle with long-range dependencies.
+Transformers replaced recurrence with a mechanism that:
+	•	looks at all positions in a sequence simultaneously,
+	•	weighs how important each token is relative to all others,
+	•	and does this efficiently using matrix operations.
+
+This mechanism—self-attention—is what allows models like GPT to generate coherent text, learn context, and reason over long spans.
+
+## 3.2 The Core Idea: Queries, Keys, and Values.
+
+Every position in a sequence is transformed into three vectors:
+	•	Query (Q) – represents the question a token is asking.
+	•	Key (K) – represents how relevant a token is to others.
+	•	Value (V) – carries the actual information to be aggregated.
+
+Self-attention computes similarity between each query and key pair.
+These similarities determine how much each value contributes to the final representation.
+
+Even at the character level, this mechanism enables the model to:
+	•	understand repeated patterns,
+	•	capture local and global structure,
+	•	build internal representations far richer than raw tokens.
+
+## 3.3 Multi-Head Attention: Learning Multiple Patterns at Once
+
+A single attention head learns only one type of relationship.
+GPT uses multiple heads, each focusing on different aspects of the sequence.
+
+In this project:
+	•	the number of heads is small,
+	•	each head has reduced dimensionality,
+	•	and the design follows the original GPT architecture.
+
+Each head analyzes the input differently, and their outputs are combined to produce a more expressive representation.
+
+Even a tiny model benefits from this diversity of viewpoints.
+
+## 3.4 Causal Masking: Enforcing Autoregressive Behavior
+
+GPT models predict the next token.
+To ensure the model cannot cheat by looking ahead, the attention mechanism applies a causal mask that blocks future positions.
+
+This ensures the model behaves like a real autoregressive generator:
+	•	token t can only attend to positions ≤ t,
+	•	future characters are never visible during training.
+
+This simple constraint is what makes generation deterministic and left-to-right.
+
+## 3.5 Residual Connections and Layer Normalization
+
+Each attention block is wrapped inside two critical architectural components:
+	•	Residual connections, which stabilize learning and allow gradients to flow easily.
+	•	Layer normalization, which ensures numerical stability and consistent scaling.
+
+While Version 1 keeps these modules minimal, they replicate the functional structure of production LLM architectures.
+
+## 3.6 Feedforward Network (MLP Block)
+
+Following attention, the transformer includes a positionwise feed-forward network.
+
+In this implementation, it consists of:
+	•	a linear expansion,
+	•	a non-linear activation,
+	•	a linear projection back to the model dimension.
+
+This MLP acts like a local reasoning module, helping the model interpret contextual information and refine its internal representation.
+ 
+## 3.7 Putting It All Together
+
+ A full transformer block in this project includes:
+	1.	Multi-head self-attention (with causal masking)
+	2.	Residual and normalization layers
+	3.	Feedforward MLP
+	4.	Another residual and normalization pass
+
+Stacking these blocks produces the GPT backbone used across:
+	•	Pretraining
+	•	Classification finetuning
+	•	Instruction finetuning
+	•	Streamlit inference
+
+Even though this model is tiny and character-based, the underlying architecture mirrors that of GPT-2 and GPT-Neo, simply scaled down for educational purposes.
+
+## 3.8  Why Build Attention by Hand?
+
+Implementing these modules manually:
+
+	•	demystifies how LLMs process information,
+	•	provides intuition for how patterns emerge,
+	•	prepares you for more advanced architectures (GPT-2/3/NeoX),
+	•	is the foundation for Version 2, where we transition to word-level or BPE tokenization.
+
+This section is the “engine room” of the project—understanding it means understanding how every modern transformer-based model works internally.
 
 # 4. GPT Model.
 
