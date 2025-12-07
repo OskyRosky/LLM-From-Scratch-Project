@@ -1,5 +1,0 @@
-Large language models learn from large amounts of text.
-They use tokens to represent words or subwords.
-By training on many examples, they learn patterns in language.
-This tiny corpus is only for testing our LLM-from-scratch project.
-We will replace it later with a more realistic dataset.
