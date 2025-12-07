@@ -624,11 +624,408 @@ This finetuning step bridges the gap between:
 
 It also prepares the intuition required for the next stage—instruction tuning, where the model transitions from classification to behaving like a conversational assistant.
 
-# 7. Finetuning to Follow Instructions - instruction tuning.
+# 7. Finetuning to Follow Instructions (Instruction Tuning).
 
-# 8. UI: App Streamlit
+After pretraining the model on raw text and validating its backbone through classification, the next major evolutionary step is teaching the model to respond to natural-language instructions.
+This is the foundation of modern conversational systems—ChatGPT, Claude, Gemini, and virtually all instruction-following LLMs rely on this technique.
+
+Instruction tuning transforms a generic language model into an assistant.
+
+## 7.1 What Instruction Tuning Means
+
+A pretrained model knows language patterns, grammar, and relationships between words.
+But it does not inherently understand that:
+
+	•	a question expects an answer,
+	•	a request expects execution,
+	•	a command expects compliance,
+	•	or that a prompt defines a task.
+
+Instruction tuning explicitly teaches the model these behaviors.
+
+It does so by exposing it to many examples of the form:
+
+Instruction → Ideal Response
+
+This creates alignment between what the user wants and what the model outputs.
+
+Even small models—like ours—benefit significantly from this approach.
+
+## 7.2 Why We Use a Custom Format (<instr> / <resp>)
+
+Large LLMs use sophisticated prompting conventions, but for a character-level educational model, we need something simple, reproducible, and explicit.
+
+This teaches the model a deterministic conversational protocol:
+
+	1.	When it sees <instr>, it expects a question or command.
+	2.	When it sees <resp>, it should begin generating an answer.
+	3.	It learns to stop hallucinating metadata and focus on the content.
+
+This structured prompting is critical, especially for tiny models.
+
+## 7.3 Building the Instruction Dataset
+
+Our dataset contains multiple natural variants of the same three facts:
+
+	•	Dogs are canines.
+	•	Cats are felines.
+	•	San José is the capital of Costa Rica.
+
+Although small, the dataset covers:
+
+	•	paraphrasing,
+	•	variations in phrasing,
+	•	alternative sentence structures,
+	•	different levels of formality.
+
+This exposes the model to the idea that different inputs can map to the same correct answer.
+
+This concept—semantic equivalence—is central to everything from chatbots to retrieval-augmented models.
+
+## 7.4 Finetuning the Model with Paired Examples
+
+During instruction tuning:
+
+	1.	The pretrained backbone processes the full <instr> … <resp> sequence.
+	2.	The model is trained to predict the answer text character-by-character.
+	3.	It learns to associate instructions with appropriate outputs.
+	4.	The optimization objective remains next-token prediction, but conditioned on structured inputs.
+
+This teaches the model not only what to answer, but when and why.
+
+Instruction tuning essentially “reshapes” the probability distribution of the model such that:
+
+	•	Answers become more concise.
+	•	Irrelevant generation decreases.
+	•	Responses follow user intent.
+
+## 7.5 Limitations of a Tiny Character-Level Model
+
+Even after instruction tuning, our model has structural limitations:
+
+	•	It predicts characters, not words.
+	•	It has a very short context window.
+	•	Its capacity is orders of magnitude smaller than real LLMs.
+	•	It cannot generalize beyond taught facts.
+
+Therefore, we complement the system with a FAQ fallback, ensuring perfect outputs for known queries.
+
+This combination—tiny LLM + deterministic layer—is exactly how many production systems handle critical queries.
+
+## 7.6 What We Achieved
+
+By the end of instruction tuning, the model successfully:
+
+	•	recognizes question patterns it never saw verbatim,
+	•	answers with consistent factual information,
+	•	separates instruction from response,
+	•	behaves predictably when interacting with the Streamlit interface.
+
+While small, this stage demonstrates one of the most important ideas in modern AI:
+
+**Pretraining gives the model a brain.
+
+Instruction tuning gives the model a purpose.**
+
+## 7.7 Preparing for the Next Stage
+
+Instruction tuning leads naturally into:
+
+	•	prompt engineering,
+	•	evaluation frameworks,
+	•	safety layers,
+	•	RAG-based augmentation,
+	•	multi-task finetuning.
+
+And eventually, the much more ambitious Stage C, where we will replace character-level models with word-level or subword-level transformers, enabling far more realistic capabilities.
+
+# 8. Streamlit UI – Building a Minimal LLM Interface.
+
+A language model is most valuable when it becomes interactive—when users can test ideas, ask questions, and explore the model’s behavior.
+To enable this, we built a simple but effective Streamlit-based UI that wraps our tiny LLM into a user-friendly chat-like interface.
+
+Even though the model is small and educational, the frontend reflects the same principles used in real LLM applications.
+
+⸻
+
+## 8.1 Purpose of the UI
+
+The Streamlit interface serves several goals:
+	•	Make model behavior observable in a clean, visual environment.
+	•	Allow quick experimentation with prompts and generation parameters.
+	•	Provide a practical demonstration of instruction tuning and fallback mechanisms.
+	•	Enable reproducible testing for the three facts we fine-tuned.
+
+The UI transforms a research artifact into an interactive tool.
+
+⸻
+
+## 8.2 Main Features
+
+The interface includes:
+
+1. Prompt Input Panel
+
+A text area where the user can type or modify any instruction.
+
+2. Predefined Test Questions
+
+A set of radio-button presets for the three core evaluation prompts, making it easy to compare model behavior over time.
+
+3. Generation Controls
+
+Two adjustable parameters exposed in the sidebar:
+	•	max_new_tokens
+	•	temperature
+
+These allow you to observe how small models behave under different sampling settings—an essential part of LLM experimentation.
+
+4. Integrated FAQ Fallback (Rule-Based Layer)
+
+Before calling the model, the UI checks whether the input matches one of the known facts.
+	•	If it matches → A perfect, deterministic answer is returned.
+	•	If not → The tiny LLM generates a response.
+
+This hybrid pipeline reflects how many production AI systems operate:
+models + rules = reliability.
+
+5. Full Generation Trace
+
+The UI displays:
+	•	the cleaned, processed answer, and
+	•	the entire raw model output, including <instr> and <resp> tokens.
+
+This transparency helps you understand the generation process and diagnose errors.
+
+⸻
+
+## 8.3 Architecture of the UI
+
+The UI sits in the app/ directory and interacts with:
+	•	the instruction model loader,
+	•	the generation engine,
+	•	the tokenizer,
+	•	the fallback matcher,
+	•	and the Streamlit runtime.
+
+Even though the project is lightweight, the organization reflects a clean separation of concerns:
+	•	Frontend logic (Streamlit)
+	•	Inference logic (Python modules in src/inference)
+	•	Model architecture (in src/model)
+
+This makes it easy to:
+	•	externalize the UI into Docker,
+	•	replace the model later (e.g., word-level GPT),
+	•	add features like temperature sweeps or latency metrics,
+	•	integrate logging or analytics.
+
+⸻
+
+## 8.4 Running the Model Locally
+
+The UI was explicitly designed to run without complex infrastructure.
+With Python installed, launching the app is as simple as:
+	•	activating the local environment,
+	•	running Streamlit,
+	•	and loading the model checkpoint.
+
+Once launched, the UI runs entirely on your machine and does not require GPUs or external services.
+
+This approach is perfect for educational projects and quick prototyping.
+
+⸻
+
+## 8.5 Dockerized Version
+
+To make the UI reproducible and portable, we containerized the Streamlit application.
+The Docker version:
+	•	packages all dependencies,
+	•	includes the trained checkpoint,
+	•	exposes port 8501,
+	•	and can be deployed anywhere with Docker installed.
+
+This simulates real-world deployment workflows, where LLM services are often shipped as containerized inference microservices.
+
+⸻
+
+## 8.6 Why This UI Matters
+
+While simple, the Streamlit app is an essential part of the project:
+	•	It connects theory with practice.
+	•	It allows iterative evaluation as we expand the project (Phase C and beyond).
+	•	It demonstrates user-facing LLM interaction even with a tiny model.
+	•	It provides a framework for future additions such as:
+	•	multi-turn dialogue,
+	•	memory,
+	•	richer prompt formatting,
+	•	RAG-based lookups,
+	•	or switching between multiple checkpoints.
+
+The UI makes the LLM real.
+
 
 # 9. Improvements.
 
+Building an LLM from scratch is an iterative journey.
+Version 1 of the project demonstrates the full pipeline—from raw text to a functional (yet tiny) instruction-tuned language model—but it also reveals several structural limitations that naturally arise when training small models on limited data.
+
+This section outlines the most impactful improvements planned for the next iterations of the project.
+They are grouped into architectural, data-centric, training-centric, and product-centric enhancements.
+
+⸻
+
+## 9.1 Architectural Improvements
+
+1. Move from character-level to word- or subword-level tokenization
+
+The most influential change for V2.
+
+Character-level models are easy to implement but severely limited:
+	•	slow to learn long-range dependencies,
+	•	inefficient (long sequences → high cost),
+	•	poor semantic representation capacity,
+	•	prone to repetitive or fragmented outputs.
+
+Upgrading to WordPiece, BPE, or SentencePiece fundamentally transforms the model’s expressiveness.
+This alone will produce a dramatic jump in coherence, accuracy, and generalization.
+
+⸻
+
+2. Expand the GPT architecture
+
+Version 1 uses a tiny model for educational clarity.
+Version 2 will strengthen it by:
+	•	increasing the number of layers,
+	•	widening attention heads,
+	•	extending embedding sizes,
+	•	using RMSNorm or LayerNorm improvements,
+	•	adding rotary positional embeddings (RoPE),
+	•	exploring FlashAttention for performance.
+
+These enhancements bring the architecture closer to modern small-scale LLMs.
+
+⸻
+
+## 9.2 Data Improvements
+
+1. Build a larger, cleaner corpus
+
+V1 relies on a small locally curated text file.
+For meaningful scaling, we will introduce:
+	•	more diverse Spanish text sources,
+	•	strict deduplication,
+	•	document segmentation,
+	•	long-context formatting,
+	•	heuristic filtering for quality.
+
+Better data = better model.
+Even small autoregressive models benefit enormously from thoughtful curation.
+
+⸻
+
+2. Expand the instruction-tuning set
+
+The V1 instruction dataset is intentionally tiny (just enough to demonstrate the pipeline).
+Improvements include:
+	•	increasing the number of instructions,
+	•	diversifying phrasing,
+	•	adding different task types (reasoning, extraction, rephrasing, classification),
+	•	ensuring balanced examples per instruction family,
+	•	adopting self-instruct or synthetic generation techniques.
+
+A richer instruction set enables the model to respond in a more natural, generalizable way.
+
+⸻
+
+## 9.3 Training Pipeline Improvements
+
+1. Better optimization techniques
+
+Future versions will incorporate:
+	•	cosine learning rate scheduling,
+	•	warmup steps,
+	•	gradient clipping,
+	•	improved weight initialization,
+	•	mixed-precision training,
+	•	checkpoint averaging.
+
+These refinements stabilize training and help the model converge to stronger minima.
+
+⸻
+
+2. Scaling the context window
+
+The current model uses a short context (128 tokens).
+Version 2 will explore:
+	•	256, 512, and possibly 1024-token contexts,
+	•	ALiBi or RoPE for scalable positional reasoning.
+
+This massively improves tasks requiring multi-sentence coherence.
+
+⸻
+
+3. More robust validation and evaluation
+
+Rather than relying on a few fixed test questions, we will introduce:
+	•	automated evaluation suites,
+	•	perplexity tracking,
+	•	held-out datasets,
+	•	instruction-based benchmarks.
+
+This transforms the project from “does it run?” to “how well does it perform?”.
+
+## 9.4 Product and Interface Improvements
+
+1. Improve the Streamlit UI
+
+Planned additions:
+	•	chat-style conversation history,
+	•	adjustable system prompts,
+	•	token usage visualization,
+	•	latency monitoring,
+	•	multiple model checkpoints selection.
+
+These features bring the interface closer to a real LLM playground.
+
+2. API layer for deployment
+
+To support external integrations, a FastAPI inference service is planned:
+	•	clean REST endpoints,
+	•	lightweight load balancing,
+	•	Docker-ready deployment,
+	•	option to run CPU/GPU versions.
+
+This bridges the project into more production-oriented territory.
+
+3. Modularity for experimenting with different models
+
+The repository will support “plug-and-play” models:
+	•	character-level GPT (current V1)
+	•	word-level GPT (V2)
+	•	distilled versions
+	•	quantized versions (int8, int4)
+
+This modularity is key for ongoing research and experimentation.
+
+⸻
+
+## 9.5 Vision for V2 and Beyond
+
+The aim of these improvements is not just incremental refinement—it is to transform the project from a proof of concept into a mini research playground for LLM construction.
+
+Version 2 will represent:
+	•	a more modern architecture,
+	•	a more realistic dataset pipeline,
+	•	a more expressive tokenizer,
+	•	a more capable model,
+	•	and a significantly more powerful instruction-tuned system.
+
+And because every component remains fully transparent and hand-built, the educational value increases rather than decreases.
+
 # 10. Examples
- 
+
+This section showcases a few screenshots of the working application built in Version 1.
+The images illustrate how the Streamlit interface loads the instruction-tuned model, processes user questions, and combines both inference and fallback logic to provide responses.
+
+These examples demonstrate the end-to-end functionality of the system:
+from raw text → pretrained model → instruction tuning → interactive UI.
