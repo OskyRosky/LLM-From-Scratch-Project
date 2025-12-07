@@ -345,8 +345,194 @@ This section is the “engine room” of the project—understanding it means un
 
 # 4. GPT Model.
 
+The GPT model implemented in this project follows the original decoder-only Transformer design introduced by OpenAI. Although our Version 1 model is intentionally small and character-based, the underlying architecture mirrors the essential structure of real GPT systems.
+
+This section explains how the full model fits together and why each component matters.
+
+## 4.1 A Decoder-Only Transformer
+
+GPT belongs to the family of autoregressive language models:
+	•	It receives a sequence of tokens.
+	•	It predicts the next token.
+	•	It repeats this process step by step.
+
+To support this behavior, the model uses multiple stacked Transformer blocks, each containing:
+	1.	Masked Multi-Head Self-Attention
+	2.	Feedforward (MLP) sublayer
+	3.	Residual connections
+	4.	Layer normalization
+
+Even a tiny model benefits from these architectural principles.
+They provide stability, expressive power, and the capacity to learn long-range structure.
+
+## 4.2 Token & Position Embeddings
+
+Transformers have no inherent sense of order, so we give them two forms of input representation:
+
+Token embeddings
+
+Every character in the vocabulary is converted into a dense vector.
+In Version 1, the model learns to express relationships between characters—punctuation, spacing, frequent subpatterns, and more.
+
+Positional embeddings
+
+Since characters appear in sequences, positional embeddings encode the position of each token.
+GPT learns how the meaning of a token depends on where it occurs.
+
+Together, token + position embeddings form the input to the first attention block.
+
+## 4.3 Stacked Transformer Blocks
+
+Each GPT block applies the full Transformer logic:
+	•	The attention sublayer determines which previous characters are relevant.
+	•	The MLP sublayer interprets the aggregated information.
+	•	Residual pathways allow information to flow cleanly through the stack.
+
+Increasing the number of blocks increases model depth and reinforces the ability to model patterns.
+
+Although our model is intentionally small, the design aligns with real GPT architectures—and extending it (more layers, wider embeddings, more heads) becomes straightforward.
+
+## 4.4 Causal Attention: Enforcing Autoregression
+
+GPT is designed to generate text one token at a time.
+
+To enforce this, the attention mechanism includes a strict lower-triangular mask:
+	•	A token can attend only to earlier positions.
+	•	The model never sees future tokens during training.
+	•	Predictions remain consistent with real-world generation.
+
+This property distinguishes GPT from bidirectional models like BERT and is fundamental to sequence generation.
+
+## 4.5 Language Modeling Head (Output Layer)
+
+The final representation of each position passes through a linear projection that maps hidden states to the vocabulary size.
+
+The model outputs a probability distribution over all tokens.
+During training, the objective is simple:
+
+Predict the next token in the sequence as accurately as possible.
+
+This is the foundation for:
+	•	pretraining on large corpora,
+	•	finetuning for classification,
+	•	finetuning for instruction following.
+
+Everything else—the emergent reasoning, structure, coherence—arises from maximizing this next-token objective across many examples.
+
+## 4.6 Why Build GPT From Scratch?
+
+Manually implementing GPT demystifies how modern LLMs operate:
+	•	You can inspect every tensor and operation.
+	•	You understand what is learned and why.
+	•	You gain full control over architecture modifications.
+	•	You build intuition for scaling laws, training dynamics, and efficiency constraints.
+
+This foundation becomes crucial when transitioning to Version 2, where we incorporate word/BPE tokenization and scale the architecture to handle richer language patterns.
+
+## 4.7 A Minimal but Complete GPT Engine
+
+While Version 1 is small enough to run on a laptop, it includes all essential architectural components:
+
+	•	Learnable embeddings
+	•	Multi-Head Self-Attention
+	•	Causal masking
+	•	Transformer blocks
+	•	Autoregressive decoding
+	•	Full training loop for pretraining and finetuning
+
+This provides a clean, understandable base that is both educational and extensible.
+
+In short: Version 1 is a real GPT, just scaled down to reveal how everything works.
 
 # 5. Pretraining 
+
+Pretraining is the foundational stage of any GPT-like model. It is where the model learns the fundamental structure of language by repeatedly predicting the next token in a sequence. Even in our small character-level version, this process is what gives the model its initial “knowledge” before any specialized finetuning.
+
+## 5.1 Objective: Next-Token Prediction
+
+The core idea is simple:
+	•	Take a long sequence of text.
+	•	Feed it into the model.
+	•	Ask the model to predict the next character at every position.
+
+Every prediction produces a loss value.
+By minimizing that loss across millions of predictions, the model gradually discovers:
+	•	which characters or patterns commonly follow others,
+	•	how sentences and structures flow,
+	•	how context influences meaning.
+
+Even without explicit linguistic rules, the model learns statistical regularities purely from exposure.
+
+This mirrors how real GPT models are trained at scale—just with much smaller datasets and capacity.
+
+
+## 5.2 Training on the OSCAR Corpus
+
+To pretrain the tiny model, we use a subset of the OSCAR dataset—a large multilingual web corpus.
+From it, we derive a simplified Spanish text file (oscar_corpus.txt) suitable for a character-level language model.
+
+Key preprocessing steps:
+	•	cleaning non-printable characters
+	•	lowercasing or normalization
+	•	removing extremely long lines
+	•	preparing a contiguous training stream
+
+The model does not learn “facts” at this stage; it only learns patterns of text.
+
+This is intentional: pretraining provides general linguistic ability, while finetuning injects task-specific knowledge.
+
+## 5.3 Training Dynamics
+
+During pretraining:
+	•	The model reads sequences of fixed length.
+	•	It shifts the same sequence by one character to build the “labels.”
+	•	The loss function compares the predicted character to the actual next character.
+	•	Gradients update all model parameters, including attention, embeddings and MLP layers.
+
+As training progresses, the model develops:
+	•	stronger character-level coherence,
+	•	better attention focusing on relevant context,
+	•	improved ability to complete words or phrases.
+
+Although Version 1 is intentionally tiny, it still demonstrates the essential learning behavior that powers large-scale LLMs.
+
+## 5.4 What Pretraining Enables
+
+Once the model is pretrained, several capabilities emerge:
+
+Generalization
+
+The model can continue text sequences with plausible structure.
+
+Knowledge Transfer
+
+The pretrained backbone serves as a foundation for downstream tasks.
+Instead of starting from random weights, finetuning begins from a partially trained model that already “understands” syntax and text flow.
+
+Instruction Tuning
+
+In later stages, we teach the model to follow commands using curated prompt → response pairs.
+Without pretraining, this would be impossible.
+
+## 5.5 Why Pretraining Matters in a From-Scratch Project
+
+Building this stage manually contains immense learning value:
+	•	You understand the full data pipeline and why sequence preparation matters.
+	•	You see how a Transformer learns from raw text rather than predefined rules.
+	•	You experience the computational constraints that guide architecture and dataset choices.
+	•	You gain intuition about how scaling up affects behavior and performance.
+
+Pretraining is not just the beginning of the project—it is the foundation on which every later improvement is built.
+
+## 5.6 Limitations of a Tiny Character-Level Pretrained Model
+
+It is important to acknowledge the constraints:
+	•	Character-level modeling is expressive but inefficient.
+	•	The model capacity is extremely limited.
+	•	Learning semantic knowledge is nearly impossible at this scale.
+	•	Sequence length boundaries restrict long-context behaviors.
+
+These limitations motivate the shift to Version 2, where we adopt subword tokenization, longer context windows, and larger model capacity.
 
 # 6. Finetuning for Text Classification (hidden states + backbone preentrenado real)
 
