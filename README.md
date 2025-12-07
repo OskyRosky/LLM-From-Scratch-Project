@@ -536,6 +536,94 @@ These limitations motivate the shift to Version 2, where we adopt subword tokeni
 
 # 6. Finetuning for Text Classification (hidden states + backbone preentrenado real)
 
+Once the base model has been pretrained on raw text, it becomes a reusable backbone capable of understanding linguistic patterns. Finetuning leverages this backbone to solve downstream supervised tasks—in our case, a simple text classification problem designed to show how hidden states can be adapted for real tasks.
+
+This step demonstrates how pretrained representations can be repurposed efficiently, even when the underlying model is tiny.
+
+##  6.1 Why Classification Finetuning Matters
+
+Classification is one of the most common applications of language models:
+	•	sentiment analysis
+	•	spam detection
+	•	topic identification
+	•	intent recognition
+	•	document routing
+
+Even large-scale models often rely on similar techniques internally.
+
+In our project, classification finetuning serves two purposes:
+	1.	Educational — it teaches how to adapt a pretrained transformer to a supervised objective.
+	2.	Practical — it validates that the model’s learned representations contain usable information beyond simple next-token prediction.
+
+This stage confirms that pretraining truly creates reusable knowledge.
+
+## 6.2 Using the Pretrained Backbone
+
+Instead of training the classifier from scratch, we reuse:
+	•	the tokenizer
+	•	the embedding layer
+	•	the multi-head attention blocks
+	•	the feed-forward layers
+	•	positional encodings
+	•	the overall GPT architecture
+
+All parameters learned during pretraining remain intact.
+
+A lightweight classification head is then added on top of the transformer’s hidden states, usually:
+	•	a small linear layer,
+	•	optionally followed by dropout or normalization,
+	•	projecting to the number of target classes.
+
+This approach mirrors modern NLP pipelines such as BERT or GPT-style adapters.
+
+## 6.3 Training the Classifier
+
+During finetuning:
+	1.	Text samples are fed into the model using the same tokenization as pretraining.
+	2.	The transformer produces contextual embeddings for every token.
+	3.	A pooled representation (often the final token, or an average) is passed to the classification head.
+	4.	The model is optimized using supervised labels and cross-entropy loss.
+	5.	Only the classification head may be trained, or optionally the entire backbone may be unfrozen.
+
+Both strategies are valuable:
+	•	Frozen backbone → fast training, stable results.
+	•	Full finetuning → higher accuracy but more computational cost.
+
+In our educational setup, either approach is possible.
+
+## 6.4 What the Model Learns
+
+Although the model is small, finetuning enables it to develop:
+	•	sensitivity to patterns in the training labels,
+	•	ability to classify short inputs reliably,
+	•	task-specific decision boundaries based on learned embeddings.
+
+It is remarkable how much performance improvement can arise from a pretrained backbone, even at this tiny scale.
+
+This mirrors the behavior of large models:
+pretraining provides general linguistic knowledge, finetuning specializes it.
+
+## 6.5 Interpreting Results
+
+Given the intentionally limited size of our model and dataset, the goal is not cutting-edge accuracy.
+Instead, we evaluate:
+	•	whether the loss decreases consistently,
+	•	whether the classifier separates classes with minimal overfitting,
+	•	whether the model relies on meaningful patterns instead of memorization.
+
+A successful finetuning experiment demonstrates that:
+	1.	the backbone representations are useful,
+	2.	the architecture supports downstream tasks,
+	3.	pretraining meaningfully accelerates supervised learning.
+
+## 6.6 Why This Stage Is Crucial for the Full Project
+
+This finetuning step bridges the gap between:
+	•	generic language modeling (pretraining), and
+	•	task-driven outputs (classification, instruction following).
+
+It also prepares the intuition required for the next stage—instruction tuning, where the model transitions from classification to behaving like a conversational assistant.
+
 # 7. Finetuning to Follow Instructions - instruction tuning.
 
 # 8. UI: App Streamlit
