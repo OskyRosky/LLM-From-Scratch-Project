@@ -36,9 +36,8 @@ def get_model_bundle(device_str: str = "mps") -> InstructionsModelBundle:
     """
     Carga el modelo de instrucciones y lo cachea.
 
-    OJO:
-      - Aquí usamos la MISMA interfaz que en eval_instructions_mini:
-        load_instructions_model(ckpt_dir, device_str=...)
+    Usamos la interfaz:
+        load_instructions_model(ckpt_dir=..., device_str=...)
     """
     ckpt_dir = "models/checkpoints_oscar_long"
 
@@ -67,7 +66,7 @@ temperature = st.sidebar.slider(
     "temperature",
     min_value=0.0,
     max_value=1.5,
-    value=0.0,  # igual que en eval_instructions_mini para que sea determinista
+    value=0.0,  # igual que en eval_instructions_mini
     step=0.05,
 )
 
@@ -119,10 +118,8 @@ if st.button("Generar respuesta"):
         st.warning("Por favor escribe una instrucción o pregunta.")
     else:
         with st.spinner("Cargando modelo (si es la primera vez) y generando respuesta..."):
-            # Cargamos el bundle SOLO aquí (y cacheado)
             bundle = get_model_bundle(device_str="mps")
 
-            # IMPORTANTE: generate_answer ya la tienes retornando (answer_text, full_text)
             answer_text, full_text = generate_answer(
                 bundle=bundle,
                 prompt=prompt,
