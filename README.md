@@ -8,23 +8,114 @@
 
 1.  **Intro** 🧳
 
+This project demonstrates how to build a functional Large Language Model from scratch, starting with raw text data and progressively adding training infrastructure, attention mechanisms, pretraining, instruction tuning, and a UI for real-time interaction. It serves both as an educational journey and a fully reproducible implementation.
+
 2.  **Tech Stack** 🤖
 
+The system is built entirely with modern, lightweight tools:
+
+	•	Python 3.10+
+	•	PyTorch for model architecture and training
+	•	Streamlit for the interactive demo UI
+	•	Docker for reproducible deployment
+	•	GitHub for version control and documentation
+	•	Parquet/Text datasets for training
+
+The project is intentionally minimalistic so every component can be inspected and understood.
 
 3.  **Features** 🤳🏽
 
+•	Character-level tokenizer and dataset pipeline
+
+•	Custom implementation of Multi-Head Self-Attention
+
+•	Compact GPT-style decoder architecture
+
+•	Pretraining on a text corpus
+
+•	Two finetuning pathways:
+
+•	Classification (using frozen backbone + hidden states)
+
+•	Instruction tuning (learning to follow prompts)
+
+•	Streamlit interface with inference + FAQ fallback
+
+•	Dockerized version for portable deployment
 
 4.  **Process** 👣
 
+The project follows a clean, incremental learning path:
+
+1.	Build core infrastructure and modular project structure
+2.	Prepare text data and tokenization
+3.	Implement attention and transformer blocks
+4.	Train a GPT-like model from scratch
+5.	Add task-specific finetuning (classification)
+6.	Train the model to answer instructions
+7.	Deploy an app to interact with the model
+
+Each stage builds on the previous one, making the full pipeline easy to follow.
 
 5.  **Learning** 💡
 
+Throughout the repo, you learn:
+
+•	How transformers actually process data
+
+•	Why attention is computationally expensive
+
+•	How pretraining shapes hidden representations
+
+•	How small models behave vs. large LLMs
+
+•	What instruction tuning requires at a low level
+
+•	How to structure real ML projects for scalability
+
+The goal is not to compete with GPT-size models, but to deeply understand them.
 
 6.  **Improvement** 🔩
 
+Future development focuses on:
+
+•	Switching to word/BPE tokenization
+
+•	Scaling model depth and width
+
+•	Expanding the instruction dataset
+
+•	Adding evaluation benchmarks
+
+•	Moving from single-file corpus to multi-domain datasets
+
+•	Migrating to Version 2 with a stronger architecture and training loop
+
+This repository is designed to evolve into a more capable LLM pipeline.
 
 7.  **Running the Project** ⚙️
 
+You can run the project in two ways:
+
+•	Local environment
+
+```Python
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+•	Dockerized deployment
+
+```Python
+docker build -t llm-from-scratch-v1 .
+docker run -p 8501:8501 llm-from-scratch-v1
+```
+
+After launching, open:
+http://localhost:8501
+to interact with the model.
 
 8 .  **More** 🙌🏽
 
