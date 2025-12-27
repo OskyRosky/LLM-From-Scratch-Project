@@ -1,28 +1,56 @@
-# --- Large raw corpora (no versionar) ---
-data/raw/oscar-small-train.parquet
-data/raw/oscar_corpus.txt
+# ==================================================
+# Python / virtual environments
+# ==================================================
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
 
-# patrón general por si creas más
-data/raw/*.parquet
-data/raw/*corpus*.txt
+# ==================================================
+# Data (NEVER commit data)
+# ==================================================
+data/
+V1/data/
+V2/data/
 
-# LLM data (never commit)
-V2/data/raw/
-V2/data/interim/
-V2/data/processed/
-
-
-*.txt
-*.jsonl
+# Raw corpora & datasets
 *.parquet
 *.arrow
+*.csv
+*.jsonl
+*corpus*.txt
+
+# (permitir docs y READMEs en txt)
+!README.txt
+
+# ==================================================
+# Models / tokenizers / checkpoints
+# ==================================================
+models/
+checkpoints/
 *.bin
 *.pt
 *.ckpt
+*.safetensors
+tokenizer.json
 
-# data (raw/interim/processed)
-V2/data/
-data/
-*.txt
-*.parquet
-*.csv
+# ==================================================
+# Training outputs / logs
+# ==================================================
+logs/
+runs/
+wandb/
+mlruns/
+
+# ==================================================
+# OS / editor
+# ==================================================
+.DS_Store
+.vscode/
+.idea/
+
+# ==================================================
+# Temporary / misc
+# ==================================================
+tmp/
+cache/
