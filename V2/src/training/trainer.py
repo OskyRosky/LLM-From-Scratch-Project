@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union, List, Any
 
 import torch
 from torch import nn, Tensor
@@ -18,8 +18,11 @@ class Trainer:
     Entrenador genérico para language modeling (GPT pequeño).
 
     Asume que:
-      - el modelo devuelve (logits, attn) en el forward,
       - los dataloaders devuelven (input_ids, target_ids) de enteros.
+      - el modelo puede devolver:
+          a) logits directamente (Tensor 3D: B,T,V)
+          b) una tupla/lista que contiene logits en algún lugar
+             (por ejemplo (logits, attn) o (loss, logits, extra)).
     """
 
     def __init__(
@@ -41,7 +44,7 @@ class Trainer:
         else:
             self.device = train_cfg.resolved_device()
 
-        # Grad clip (usamos max_grad_norm si existe en el config)
+        # Grad clip (usa max_grad_norm si existe en el config)
         if grad_clip is not None:
             self.grad_clip = grad_clip
         else:
@@ -62,17 +65,55 @@ class Trainer:
     ) -> Tuple[Tensor, Tensor]:
         return input_ids.to(self.device), target_ids.to(self.device)
 
+    def _extract_logits(self, out: Any) -> Tensor:
+        """
+        Extrae logits (Tensor 3D: B, T, V) de la salida del modelo.
+
+        Casos soportados:
+          - out es Tensor 3D -> logits
+          - out es tuple/list -> busca el primer Tensor 3D
+        """
+        # Caso 1: el modelo devuelve directamente logits
+        if isinstance(out, torch.Tensor):
+            if out.ndim != 3:
+                raise ValueError(
+                    f"Salida del modelo es Tensor pero no es 3D (B,T,V). "
+                    f"shape={tuple(out.shape)}"
+                )
+            return out
+
+        # Caso 2: el modelo devuelve tuple/list (buscar el primer tensor 3D)
+        if isinstance(out, (tuple, list)):
+            for x in out:
+                if isinstance(x, torch.Tensor) and x.ndim == 3:
+                    return x
+
+            # Si no hay tensor 3D, mostrar qué había para depurar rápido
+            shapes: List[Union[tuple, str]] = []
+            for x in out:
+                if isinstance(x, torch.Tensor):
+                    shapes.append(tuple(x.shape))
+                else:
+                    shapes.append(type(x).__name__)
+            raise ValueError(
+                "No encontré logits 3D (B,T,V) en la salida del modelo. "
+                f"Elementos={shapes}"
+            )
+
+        raise TypeError(f"Salida del modelo no soportada: {type(out)}")
+
     def _step(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         """
         Un paso de forward + loss (sin backward ni optimizer).
         Devuelve la loss (scalar tensor).
         """
-        logits, _ = self.model(input_ids)  # (B, T, vocab)
+        out = self.model(input_ids)
+        logits = self._extract_logits(out)  # (B, T, V)
         loss = language_modeling_loss(logits, target_ids)
         return loss
 
     # ---------------------------------------------------------
-    #  Paso individual (lo que usará pretrain_gpt)
+    #  Paso individual (lo que usará pretrain_gpt / pretrain_gpt_tokens)
     # ---------------------------------------------------------
     def train_step(self, input_ids: Tensor, target_ids: Tensor) -> float:
         """
@@ -97,15 +138,14 @@ class Trainer:
 
         self.optimizer.step()
 
-        return float(loss.item())
+        return float(loss.detach().item())
 
     # ---------------------------------------------------------
-    #  Época completa (la dejamos por compatibilidad)
+    #  Época completa (compatibilidad)
     # ---------------------------------------------------------
     def train_epoch(self, dataloader: DataLoader) -> float:
         """
         Entrena el modelo sobre un dataloader (una época completa).
-
         Devuelve la loss media.
         """
         self.model.train()
@@ -160,15 +200,14 @@ class Trainer:
 
             loss = self._step(input_ids, target_ids)
 
-            total_loss += loss.item()
+            total_loss += float(loss.detach().item())
             num_batches += 1
 
-            # Logging opcional de progreso
             if logger is not None and log_every and batch_idx % log_every == 0:
                 progress = 100.0 * batch_idx / total_batches
                 logger.info(
                     f"[val {batch_idx}/{total_batches} "
-                    f"({progress:.2f}%)] loss={loss.item():.4f}"
+                    f"({progress:.2f}%)] loss={float(loss.detach().item()):.4f}"
                 )
 
         mean_loss = total_loss / max(1, num_batches)
@@ -186,7 +225,6 @@ class Trainer:
     ) -> Path:
         """
         Guarda un checkpoint sencillo en self.ckpt_dir.
-
         Devuelve la ruta final del archivo.
         """
         ckpt_path = self.ckpt_dir / filename
