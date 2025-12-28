@@ -88,7 +88,6 @@ class Trainer:
                 if isinstance(x, torch.Tensor) and x.ndim == 3:
                     return x
 
-            # Si no hay tensor 3D, mostrar qué había para depurar rápido
             shapes: List[Union[tuple, str]] = []
             for x in out:
                 if isinstance(x, torch.Tensor):
@@ -138,7 +137,6 @@ class Trainer:
 
         self.optimizer.step()
 
-        # detach() evita warnings y asegura que devolvemos un número limpio
         return float(loss.detach().item())
 
     # ---------------------------------------------------------
@@ -174,11 +172,6 @@ class Trainer:
     ) -> float:
         """
         Evalúa el modelo sobre un dataloader (sin gradientes).
-
-        - Si se pasa logger y log_every, muestra el progreso en %
-          durante la validación.
-        - Si se pasa max_batches, solo evalúa sobre los primeros
-          max_batches lotes (útil para no tardar horas).
         """
         self.model.eval()
         total_loss = 0.0
@@ -187,7 +180,6 @@ class Trainer:
         if len(dataloader) == 0:
             return 0.0
 
-        # Cuántos batches vamos a evaluar realmente
         total_batches = len(dataloader)
         if max_batches is not None:
             total_batches = min(total_batches, max_batches)
@@ -200,16 +192,15 @@ class Trainer:
             input_ids, target_ids = self._move_batch_to_device(input_ids, target_ids)
 
             loss = self._step(input_ids, target_ids)
-
             loss_val = float(loss.detach().item())
+
             total_loss += loss_val
             num_batches += 1
 
             if logger is not None and log_every and batch_idx % log_every == 0:
                 progress = 100.0 * batch_idx / total_batches
                 logger.info(
-                    f"[val {batch_idx}/{total_batches} "
-                    f"({progress:.2f}%)] loss={loss_val:.4f}"
+                    f"[val {batch_idx}/{total_batches} ({progress:.2f}%)] loss={loss_val:.4f}"
                 )
 
         mean_loss = total_loss / max(1, num_batches)
@@ -227,7 +218,6 @@ class Trainer:
     ) -> Path:
         """
         Guarda un checkpoint sencillo en self.ckpt_dir.
-        Devuelve la ruta final del archivo.
         """
         ckpt_path = self.ckpt_dir / filename
 
