@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import deque
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Optional
 
+import torch
 from torch.utils.data import DataLoader, random_split
 
 from src.config.training_config import TrainingConfig
@@ -19,32 +21,12 @@ from src.utils.seed import set_seed
 from src.utils.logging_utils import get_logger
 
 
-def load_meta(meta_path: str) -> Dict[str, Any]:
+def load_meta(meta_path: str) -> dict:
     p = Path(meta_path)
     if not p.exists():
         raise FileNotFoundError(f"meta.json not found: {p}")
     with p.open("r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    if "bin_file" not in meta:
-        raise KeyError("meta.json must contain key 'bin_file'")
-    if "vocab_size" not in meta:
-        raise KeyError("meta.json must contain key 'vocab_size'")
-
-    return meta
-
-
-def resolve_tokens_bin(meta_path: str, bin_file_value: str) -> str:
-    """
-    Resuelve el path de tokens.bin:
-    - Si meta['bin_file'] es absoluto -> se usa directo
-    - Si es relativo -> se resuelve relativo al directorio del meta.json
-    """
-    meta_dir = Path(meta_path).resolve().parent
-    p = Path(bin_file_value)
-    if p.is_absolute():
-        return str(p)
-    return str((meta_dir / p).resolve())
+        return json.load(f)
 
 
 def build_dataloaders_from_bin(
@@ -59,11 +41,6 @@ def build_dataloaders_from_bin(
     n_total = len(ds)
     n_val = max(1, int(val_ratio * n_total))
     n_train = n_total - n_val
-    if n_train <= 0:
-        raise ValueError(
-            f"Dataset demasiado pequeño para val_ratio={val_ratio}. "
-            f"len(ds)={n_total} => n_train={n_train}, n_val={n_val}"
-        )
 
     train_ds, val_ds = random_split(ds, [n_train, n_val])
 
@@ -84,32 +61,22 @@ def build_dataloaders_from_bin(
     return train_loader, val_loader
 
 
+def mean(values) -> Optional[float]:
+    vals = list(values)
+    if not vals:
+        return None
+    return float(sum(vals) / len(vals))
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Pretrain GPT from token ids (BPE tokens.bin)."
-    )
-    parser.add_argument(
-        "--meta",
-        type=str,
-        required=True,
-        help="Path to meta.json (from build_token_ids)",
-    )
+    parser = argparse.ArgumentParser(description="Pretrain GPT from token ids (BPE tokens.bin).")
+    parser.add_argument("--meta", type=str, required=True, help="Path to meta.json (from build_token_ids)")
     parser.add_argument("--seq_len", type=int, default=256, help="Sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--max_steps", type=int, default=2000, help="Max training steps")
-    parser.add_argument(
-        "--max_epochs",
-        type=int,
-        default=1,
-        help="Max epochs (stops earlier if max_steps hit)",
-    )
+    parser.add_argument("--max_epochs", type=int, default=1, help="Max epochs (stops earlier if max_steps hit)")
     parser.add_argument("--device", type=str, default="auto", help="cpu|cuda|mps|auto")
-    parser.add_argument(
-        "--ckpt_dir",
-        type=str,
-        default="models/checkpoints/pretrain_bpe_v4",
-        help="Checkpoint dir",
-    )
+    parser.add_argument("--ckpt_dir", type=str, default="models/checkpoints/pretrain_bpe_v4", help="Checkpoint dir")
 
     # model size
     parser.add_argument("--d_model", type=int, default=256)
@@ -119,17 +86,16 @@ def main() -> None:
 
     # validation
     parser.add_argument("--val_ratio", type=float, default=0.05, help="Validation ratio (0.0-0.5)")
+
+    # logging stability
+    parser.add_argument("--train_avg_window", type=int, default=50, help="Moving average window for train loss")
     args = parser.parse_args()
 
     logger = get_logger("pretrain_gpt_tokens")
 
-    # Validación de val_ratio
-    if not (0.0 <= args.val_ratio <= 0.5):
-        raise ValueError("--val_ratio debe estar entre 0.0 y 0.5")
-
     # 1) Cargar meta
     meta = load_meta(args.meta)
-    tokens_bin = resolve_tokens_bin(args.meta, meta["bin_file"])
+    tokens_bin = meta["bin_file"]
     vocab_size = int(meta["vocab_size"])
     dtype = meta.get("dtype", "uint16")
 
@@ -166,18 +132,18 @@ def main() -> None:
     # 5) Optimizador + Trainer
     optimizer = create_optimizer(model, train_cfg)
 
-    ckpt_dir = Path(args.ckpt_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = args.ckpt_dir
+    Path(ckpt_dir).mkdir(parents=True, exist_ok=True)
 
     # Guardar una "huella" del tokenizer/meta asociado al pretraining
-    with (ckpt_dir / "tokenizer_meta.json").open("w", encoding="utf-8") as f:
+    with open(Path(ckpt_dir) / "tokenizer_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
         train_cfg=train_cfg,
-        ckpt_dir=str(ckpt_dir),
+        ckpt_dir=ckpt_dir,
     )
 
     # 6) Loop de training por steps
@@ -191,6 +157,9 @@ def main() -> None:
         f"d_model={args.d_model}, n_layers={args.n_layers}, n_heads={args.n_heads}"
     )
 
+    # Promedio móvil de loss
+    window = int(args.train_avg_window)
+    recent_losses = deque(maxlen=max(1, window))
     last_train_loss: Optional[float] = None
 
     for epoch in range(max_epochs):
@@ -206,10 +175,19 @@ def main() -> None:
 
             loss = trainer.train_step(input_ids, target_ids)
             last_train_loss = loss
+            recent_losses.append(loss)
 
             if log_every and global_step % log_every == 0:
                 progress = 100.0 * global_step / max_steps
-                logger.info(f"[step {global_step}/{max_steps} ({progress:.2f}%)] loss={loss:.4f}")
+
+                loss_avg = mean(recent_losses)
+                ppl_avg = loss_to_perplexity(loss_avg) if loss_avg is not None else float("nan")
+
+                logger.info(
+                    f"[step {global_step}/{max_steps} ({progress:.2f}%)] "
+                    f"loss_last={loss:.4f} loss_avg_{len(recent_losses)}={loss_avg:.4f} "
+                    f"train_ppl_avg_{len(recent_losses)}={ppl_avg:.2f}"
+                )
 
     logger.info("Finished training loop, running final validation...")
 
@@ -226,13 +204,19 @@ def main() -> None:
     else:
         val_loss = float("nan")
 
-    # 8) Perplexity (blindado en evaluation.loss_to_perplexity)
-    train_loss_for_ppl = last_train_loss if last_train_loss is not None else val_loss
-    train_ppl = loss_to_perplexity(train_loss_for_ppl)
-    val_ppl = loss_to_perplexity(val_loss)
+    # train_ppl usando promedio móvil si existe; si no, usa el último loss
+    train_loss_for_ppl = mean(recent_losses)
+    if train_loss_for_ppl is None:
+        train_loss_for_ppl = last_train_loss if last_train_loss is not None else val_loss
 
-    logger.info(f"Final train_ppl={train_ppl:.2f} val_ppl={val_ppl:.2f}")
-    logger.info(f"Checkpoint dir: {str(ckpt_dir)}")
+    train_ppl = loss_to_perplexity(train_loss_for_ppl)
+    val_ppl = loss_to_perplexity(val_loss) if val_loss == val_loss else float("nan")
+
+    logger.info(
+        f"Final train_loss_for_ppl={train_loss_for_ppl:.4f} train_ppl={train_ppl:.2f} "
+        f"val_loss={val_loss:.4f} val_ppl={val_ppl:.2f}"
+    )
+    logger.info(f"Checkpoint dir: {ckpt_dir}")
 
 
 if __name__ == "__main__":
