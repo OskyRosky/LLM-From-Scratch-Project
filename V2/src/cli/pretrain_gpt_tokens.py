@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import deque
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
@@ -20,6 +21,9 @@ from src.utils.seed import set_seed
 from src.utils.logging_utils import get_logger
 
 
+# -------------------------
+# Helpers
+# -------------------------
 def load_meta(meta_path: str) -> Dict[str, Any]:
     p = Path(meta_path)
     if not p.exists():
@@ -92,19 +96,34 @@ def mean(values) -> Optional[float]:
     return float(sum(vals) / len(vals))
 
 
+def is_finite_number(x: Optional[float]) -> bool:
+    if x is None:
+        return False
+    try:
+        xf = float(x)
+    except Exception:
+        return False
+    return math.isfinite(xf)
+
+
 def format_ppl(loss_value: Optional[float], ppl_threshold: float) -> str:
     """
     Devuelve un string amigable para perplexity:
     - si loss is None -> "NA"
+    - si loss no es finita -> "NA (nan/inf)"
     - si loss > threshold -> "NA (loss>threshold)"
     - si loss <= threshold -> número con 2 decimales
     """
     if loss_value is None:
         return "NA"
+
     try:
         lf = float(loss_value)
     except Exception:
         return "NA"
+
+    if not math.isfinite(lf):
+        return "NA (nan/inf)"
 
     if lf > ppl_threshold:
         return f"NA (loss>{ppl_threshold:g})"
@@ -113,10 +132,44 @@ def format_ppl(loss_value: Optional[float], ppl_threshold: float) -> str:
     if ppl != ppl:  # NaN
         return "NA"
     if ppl == float("inf"):
-        return f"NA (overflow)"
+        return "NA (overflow)"
     return f"{ppl:.2f}"
 
 
+def dump_run_config(
+    ckpt_dir: Path,
+    args: argparse.Namespace,
+    meta_path: str,
+    tokens_bin: str,
+    vocab_size: int,
+    dtype: str,
+    gpt_cfg: GPTConfig,
+    train_cfg: TrainingConfig,
+) -> None:
+    payload: Dict[str, Any] = {
+        "meta_path": str(Path(meta_path).resolve()),
+        "tokens_bin": str(Path(tokens_bin).resolve()),
+        "vocab_size": int(vocab_size),
+        "dtype": dtype,
+        "args": vars(args),
+        "gpt_config": {
+            "vocab_size": gpt_cfg.vocab_size,
+            "max_seq_len": gpt_cfg.max_seq_len,
+            "d_model": gpt_cfg.d_model,
+            "n_heads": gpt_cfg.n_heads,
+            "n_layers": gpt_cfg.n_layers,
+            "dropout": gpt_cfg.dropout,
+        },
+        "training_config": dict(train_cfg.__dict__),
+    }
+
+    with (ckpt_dir / "run_config.json").open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+# -------------------------
+# Main
+# -------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pretrain GPT from token ids (BPE tokens.bin)."
@@ -156,6 +209,7 @@ def main() -> None:
     args = parser.parse_args()
     logger = get_logger("pretrain_gpt_tokens")
 
+    # Basic arg validation
     if not (0.0 <= args.val_ratio <= 0.5):
         raise ValueError("--val_ratio debe estar entre 0.0 y 0.5")
     if args.train_avg_window <= 0:
@@ -202,16 +256,36 @@ def main() -> None:
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # Save tokenizer/meta footprint
     with (ckpt_dir / "tokenizer_meta.json").open("w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    trainer = Trainer(model=model, optimizer=optimizer, train_cfg=train_cfg, ckpt_dir=str(ckpt_dir))
+    # Save run config (args + gpt_cfg + train_cfg)
+    dump_run_config(
+        ckpt_dir=ckpt_dir,
+        args=args,
+        meta_path=args.meta,
+        tokens_bin=tokens_bin,
+        vocab_size=vocab_size,
+        dtype=dtype,
+        gpt_cfg=gpt_cfg,
+        train_cfg=train_cfg,
+    )
+
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        train_cfg=train_cfg,
+        ckpt_dir=str(ckpt_dir),
+    )
 
     # 6) Train loop
     global_step = 0
     max_steps = int(args.max_steps)
     max_epochs = int(args.max_epochs)
-    log_every = getattr(train_cfg, "log_every", 10)
+   # logging frequency (prefer % of run)
+    default_log_every = max(1, int(round(max_steps * 0.01)))  # 1% por defecto
+    log_every = getattr(train_cfg, "log_every", default_log_every)
 
     logger.info(
         f"Starting token pretraining: vocab_size={vocab_size}, seq_len={args.seq_len}, "
@@ -220,34 +294,67 @@ def main() -> None:
 
     recent_losses = deque(maxlen=int(args.train_avg_window))
     last_train_loss: Optional[float] = None
+    aborted = False
 
-    for epoch in range(max_epochs):
-        if global_step >= max_steps:
-            break
-
-        for batch in train_loader:
+    try:
+        for epoch in range(max_epochs):
             if global_step >= max_steps:
                 break
 
-            input_ids, target_ids = batch
-            global_step += 1
+            for batch in train_loader:
+                if global_step >= max_steps:
+                    break
 
-            loss = trainer.train_step(input_ids, target_ids)
-            last_train_loss = loss
-            recent_losses.append(loss)
+                input_ids, target_ids = batch
+                global_step += 1
 
-            if log_every and global_step % log_every == 0:
-                progress = 100.0 * global_step / max_steps
+                loss = trainer.train_step(input_ids, target_ids)
 
-                loss_avg = mean(recent_losses)
-                ppl_avg_str = format_ppl(loss_avg, args.report_ppl_when_loss_leq)
+                # Guardrail: train loss must be finite
+                if not is_finite_number(loss):
+                    logger.error(f"[FATAL] Non-finite train loss at step={global_step}: loss={loss!r}")
+                    trainer.save_checkpoint(
+                        filename=f"ckpt_nan_step_{global_step}.pt",
+                        epoch=epoch,
+                        global_step=global_step,
+                        val_loss=None,
+                    )
+                    aborted = True
+                    raise SystemExit(1)
 
-                logger.info(
-                    f"[step {global_step}/{max_steps} ({progress:.2f}%)] "
-                    f"loss_last={loss:.4f} "
-                    f"loss_avg_{len(recent_losses)}={loss_avg:.4f} "
-                    f"train_ppl_avg_{len(recent_losses)}={ppl_avg_str}"
-                )
+                last_train_loss = float(loss)
+                recent_losses.append(last_train_loss)
+
+                if log_every and global_step % log_every == 0:
+                    progress = 100.0 * global_step / max_steps
+
+                    loss_avg = mean(recent_losses)
+                    # Guardrail: loss_avg should also be finite (if computed)
+                    if loss_avg is not None and not is_finite_number(loss_avg):
+                        logger.error(
+                            f"[FATAL] Non-finite loss_avg at step={global_step}: loss_avg={loss_avg!r}"
+                        )
+                        trainer.save_checkpoint(
+                            filename=f"ckpt_nan_avg_step_{global_step}.pt",
+                            epoch=epoch,
+                            global_step=global_step,
+                            val_loss=None,
+                        )
+                        aborted = True
+                        raise SystemExit(1)
+
+                    ppl_avg_str = format_ppl(loss_avg, args.report_ppl_when_loss_leq)
+
+                    logger.info(
+                        f"[step {global_step}/{max_steps} ({progress:.2f}%)] "
+                        f"loss_last={last_train_loss:.4f} "
+                        f"loss_avg_{len(recent_losses)}={loss_avg:.4f} "
+                        f"train_ppl_avg_{len(recent_losses)}={ppl_avg_str}"
+                    )
+
+    finally:
+        if aborted:
+            logger.info("Aborted run due to non-finite values (checkpoint saved).")
 
     logger.info("Finished training loop, running final validation...")
 
@@ -255,6 +362,7 @@ def main() -> None:
     if len(val_loader) > 0:
         max_val_batches = min(len(val_loader), int(args.max_val_batches))
         val_log_every = max(1, max_val_batches // 10)  # más denso para smoke
+
         val_loss = trainer.evaluate(
             val_loader,
             logger=logger,
@@ -263,6 +371,17 @@ def main() -> None:
         )
     else:
         val_loss = float("nan")
+
+    # Guardrail: val_loss must be finite
+    if not is_finite_number(val_loss):
+        logger.error(f"[FATAL] Non-finite val loss after evaluation: val_loss={val_loss!r}")
+        trainer.save_checkpoint(
+            filename=f"ckpt_nan_val_step_{global_step}.pt",
+            epoch=max_epochs - 1,
+            global_step=global_step,
+            val_loss=None,
+        )
+        raise SystemExit(1)
 
     # 8) Final metrics
     train_loss_for_ppl = mean(recent_losses)
@@ -273,9 +392,18 @@ def main() -> None:
     val_ppl_str = format_ppl(val_loss, args.report_ppl_when_loss_leq)
 
     logger.info(
-        f"Final train_loss_for_ppl={train_loss_for_ppl:.4f} train_ppl={train_ppl_str} "
-        f"val_loss={val_loss:.4f} val_ppl={val_ppl_str}"
+        f"Final train_loss_for_ppl={float(train_loss_for_ppl):.4f} train_ppl={train_ppl_str} "
+        f"val_loss={float(val_loss):.4f} val_ppl={val_ppl_str}"
     )
+
+    # 9) Always save final checkpoint
+    final_ckpt = trainer.save_checkpoint(
+        filename=f"ckpt_final_step_{global_step}.pt",
+        epoch=max_epochs - 1,
+        global_step=global_step,
+        val_loss=float(val_loss),
+    )
+    logger.info(f"Saved final checkpoint: {str(final_ckpt)}")
     logger.info(f"Checkpoint dir: {str(ckpt_dir)}")
 
 
