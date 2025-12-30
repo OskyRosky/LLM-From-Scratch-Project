@@ -25,38 +25,48 @@ def load_json(path: str) -> Dict[str, Any]:
 
 def resolve_tokenizer_path(meta_path: str, tokenizer_path: str) -> str:
     """
-    meta.json currently stores an absolute path. That works on your Mac,
-    but will break in Docker/other machines.
+    Resolve tokenizer.json path robustly.
 
     We try, in order:
-      1) meta['tokenizer_path'] as-is
-      2) relative to meta.json directory (if meta stored a relative path)
-      3) PROJECT_ROOT/models/tokenizers/... by basename
+      1) tokenizer_path as-is (absolute or existing relative path)
+      2) relative to the meta.json directory
+      3) PROJECT_ROOT/models/tokenizers/oscar_bpe_v4/<basename>
+      4) meta_dir/<basename>
+
+    Note: meta.json currently stores an absolute path (works on your Mac),
+    but will break in Docker/other machines. This resolver makes it portable.
     """
-    if os.path.exists(tokenizer_path):
+    # 1) As-is
+    if tokenizer_path and os.path.exists(tokenizer_path):
         return tokenizer_path
 
     meta_dir = os.path.dirname(os.path.abspath(meta_path))
-    candidate = os.path.join(meta_dir, tokenizer_path)
-    if os.path.exists(candidate):
-        return candidate
 
-    # fallback: use basename and common project location
-    base = os.path.basename(tokenizer_path)
+    # 2) Relative to meta.json directory (if meta stored a relative path)
+    if tokenizer_path:
+        candidate = os.path.join(meta_dir, tokenizer_path)
+        if os.path.exists(candidate):
+            return candidate
+
+    # 3) Fallback by basename to a common project location
+    base = os.path.basename(tokenizer_path) if tokenizer_path else "tokenizer.json"
     project_root = os.path.abspath(os.path.join(meta_dir, "..", "..", ".."))  # best-effort
     candidate2 = os.path.join(project_root, "models", "tokenizers", "oscar_bpe_v4", base)
     if os.path.exists(candidate2):
         return candidate2
 
-    # last resort: meta_dir + basename
+    # 4) Last resort: meta_dir + basename
     candidate3 = os.path.join(meta_dir, base)
     if os.path.exists(candidate3):
         return candidate3
 
     raise FileNotFoundError(
-        f"Tokenizer file not found. Tried:\n"
-        f"- {tokenizer_path}\n- {candidate}\n- {candidate2}\n- {candidate3}\n"
-        f"Tip: store tokenizer_path as a relative path in meta.json for portability."
+        "Tokenizer file not found. Tried:\n"
+        f"- {tokenizer_path}\n"
+        f"- {os.path.join(meta_dir, tokenizer_path) if tokenizer_path else '(meta_dir + <none>)'}\n"
+        f"- {candidate2}\n"
+        f"- {candidate3}\n"
+        "Tip: pass --tokenizer_path explicitly or store tokenizer_path as a relative path in meta.json."
     )
 
 
@@ -93,7 +103,6 @@ def generate(
     model.eval()
 
     for _ in range(max_new_tokens):
-        # context window
         idx = input_ids[:, -block_size:]
         logits = model(idx)  # (B, T, V)
         logits = logits[:, -1, :]  # (B, V)
@@ -113,6 +122,7 @@ def generate(
 
         input_ids = torch.cat([input_ids, next_id], dim=1)
 
+        # Note: EOS check assumes batch=1 (your CLI uses a single prompt).
         if eos_id is not None and int(next_id.item()) == int(eos_id):
             break
 
@@ -131,26 +141,36 @@ def main() -> None:
     ap.add_argument("--n_heads", type=int, default=4, help="Must match training (default=4 based on your logs).")
     ap.add_argument("--seed", type=int, default=42)
 
+    # ✅ NEW: optional tokenizer override (for Docker/portability)
+    ap.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Optional override path to tokenizer.json. If not set, uses meta.json['tokenizer_path'].",
+    )
+
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
 
     meta = load_json(args.meta)
-    tok_path = resolve_tokenizer_path(args.meta, meta["tokenizer_path"])
+
+    # Choose tokenizer path: override > meta.json
+    tok_path_raw = args.tokenizer_path or meta["tokenizer_path"]
+    tok_path = resolve_tokenizer_path(args.meta, tok_path_raw)
     tokenizer = Tokenizer.from_file(tok_path)
 
-    # load checkpoint
+    # Load checkpoint
     ckpt = torch.load(args.ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
     arch = infer_arch_from_state_dict(sd)
 
-    # safety
+    # Safety
     if arch["d_model"] % args.n_heads != 0:
         raise ValueError(f"d_model={arch['d_model']} must be divisible by n_heads={args.n_heads}")
 
     # Build config to match training as closely as possible.
-    # NOTE: init_std is irrelevant at inference, but kept consistent via GPTConfig.
     cfg = GPTConfig(
         vocab_size=arch["vocab_size"],
         d_model=arch["d_model"],
@@ -173,7 +193,7 @@ def main() -> None:
 
     model.eval()
 
-    # Tokenize (no fancy templates yet)
+    # Tokenize prompt
     enc = tokenizer.encode(args.prompt)
     input_ids = torch.tensor([enc.ids], dtype=torch.long, device=device)
 
