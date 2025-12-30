@@ -4,7 +4,8 @@ import argparse
 import json
 import os
 import re
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -58,6 +59,46 @@ def resolve_tokenizer_path(meta_path: str, tokenizer_path: str) -> str:
         f"Tip: store tokenizer_path as a relative path in meta.json for portability, "
         f"or pass --tokenizer_path to override."
     )
+
+
+def resolve_pack(pack_dir: str) -> Tuple[str, str, str, Optional[str]]:
+    """
+    Resolve portable inference pack.
+
+    Expected layout:
+      <pack_dir>/
+        meta.json
+        tokenizer.json
+        config.json   (optional, currently not required)
+      <pack_dir>/../
+        ckpt_final_step_5000.pt  (default ckpt name)
+
+    Returns:
+      meta_path, ckpt_path, tokenizer_path, config_path_or_None
+    """
+    pdir = Path(pack_dir)
+    if not pdir.exists():
+        raise FileNotFoundError(f"--pack not found: {pdir}")
+
+    meta_path = pdir / "meta.json"
+    tok_path = pdir / "tokenizer.json"
+    cfg_path = pdir / "config.json"
+
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Missing meta.json in {pdir}")
+    if not tok_path.exists():
+        raise FileNotFoundError(f"Missing tokenizer.json in {pdir}")
+
+    # default checkpoint name (simple and explicit)
+    ckpt_path = pdir.parent / "ckpt_final_step_5000.pt"
+    if not ckpt_path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {ckpt_path}\n"
+            f"Tip: ensure ckpt_final_step_5000.pt is in {pdir.parent}"
+        )
+
+    config_path = str(cfg_path) if cfg_path.exists() else None
+    return str(meta_path), str(ckpt_path), str(tok_path), config_path
 
 
 def infer_arch_from_state_dict(sd: Dict[str, torch.Tensor]) -> Dict[str, int]:
@@ -131,8 +172,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Generate text from a token-level GPT checkpoint (BPE tokenizer)."
     )
-    ap.add_argument("--meta", type=str, required=True, help="Path to meta.json for the tokenized dataset.")
-    ap.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint .pt file.")
+
+    # ✅ New: pack mode (portable)
+    ap.add_argument(
+        "--pack",
+        type=str,
+        default=None,
+        help="Path to inference_pack directory. If set, auto-resolves meta/ckpt/tokenizer.",
+    )
+
+    # Legacy arguments (kept for backward compatibility)
+    ap.add_argument("--meta", type=str, help="Path to meta.json for the tokenized dataset.")
+    ap.add_argument("--ckpt", type=str, help="Path to checkpoint .pt file.")
+
     ap.add_argument("--prompt", type=str, required=True, help="Prompt text to generate from.")
     ap.add_argument("--device", type=str, default="cpu", help="cpu | mps | cuda")
     ap.add_argument("--max_new_tokens", type=int, default=128, help="How many new tokens to generate.")
@@ -167,6 +219,18 @@ def main() -> None:
 
     # Seed only matters for sampling, but harmless
     torch.manual_seed(args.seed)
+
+    # -----------------------
+    # Resolve inputs (pack OR legacy)
+    # -----------------------
+    if args.pack:
+        meta_path, ckpt_path, tok_path, _cfg_path = resolve_pack(args.pack)
+        args.meta = meta_path
+        args.ckpt = ckpt_path
+        args.tokenizer_path = tok_path
+
+    if not args.meta or not args.ckpt:
+        raise ValueError("Either use --pack OR provide --meta and --ckpt (and tokenizer via meta or --tokenizer_path).")
 
     meta = load_json(args.meta)
 
