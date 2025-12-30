@@ -89,7 +89,6 @@ def resolve_pack(pack_dir: str) -> Tuple[str, str, str, Optional[str]]:
     if not tok_path.exists():
         raise FileNotFoundError(f"Missing tokenizer.json in {pdir}")
 
-    # default checkpoint name (simple and explicit)
     ckpt_path = pdir.parent / "ckpt_final_step_5000.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(
@@ -157,7 +156,7 @@ def generate(
             probs = torch.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, num_samples=1)
         else:
-            # Greedy mode (deterministic): argmax. temperature not needed.
+            # Greedy mode (deterministic)
             next_id = torch.argmax(logits, dim=-1, keepdim=True)
 
         input_ids = torch.cat([input_ids, next_id], dim=1)
@@ -173,7 +172,7 @@ def main() -> None:
         description="Generate text from a token-level GPT checkpoint (BPE tokenizer)."
     )
 
-    # ✅ New: pack mode (portable)
+    # ✅ Pack mode (portable)
     ap.add_argument(
         "--pack",
         type=str,
@@ -181,7 +180,7 @@ def main() -> None:
         help="Path to inference_pack directory. If set, auto-resolves meta/ckpt/tokenizer.",
     )
 
-    # Legacy arguments (kept for backward compatibility)
+    # Legacy inputs (still supported)
     ap.add_argument("--meta", type=str, help="Path to meta.json for the tokenized dataset.")
     ap.add_argument("--ckpt", type=str, help="Path to checkpoint .pt file.")
 
@@ -189,25 +188,32 @@ def main() -> None:
     ap.add_argument("--device", type=str, default="cpu", help="cpu | mps | cuda")
     ap.add_argument("--max_new_tokens", type=int, default=128, help="How many new tokens to generate.")
 
-    # Decoding controls
+    # Decoding controls (default greedy)
     ap.add_argument(
         "--top_k",
         type=int,
         default=0,
-        help="Decoding mode: 0 = greedy (deterministic, recommended for evaluation). "
+        help="Decoding mode: 0 = greedy (deterministic, recommended for eval). "
              ">0 = top-k sampling (stochastic).",
     )
     ap.add_argument(
         "--temperature",
         type=float,
         default=1.0,
-        help="Sampling temperature (only used when top_k > 0). For greedy evaluation keep default 1.0.",
+        help="Sampling temperature (only used when top_k > 0). For greedy eval keep default 1.0.",
     )
 
-    ap.add_argument("--n_heads", type=int, default=4, help="Must match training (default=4 based on your logs).")
+    # Legacy compatibility: only used if ckpt has NO model_config
+    ap.add_argument(
+        "--n_heads",
+        type=int,
+        default=4,
+        help="Legacy only: used when checkpoint lacks model_config. Must match training.",
+    )
+
     ap.add_argument("--seed", type=int, default=42, help="Only affects stochastic sampling (top_k > 0).")
 
-    # ✅ override tokenizer path (portable inference)
+    # Tokenizer override
     ap.add_argument(
         "--tokenizer_path",
         type=str,
@@ -217,7 +223,6 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    # Seed only matters for sampling, but harmless
     torch.manual_seed(args.seed)
 
     # -----------------------
@@ -230,7 +235,9 @@ def main() -> None:
         args.tokenizer_path = tok_path
 
     if not args.meta or not args.ckpt:
-        raise ValueError("Either use --pack OR provide --meta and --ckpt (and tokenizer via meta or --tokenizer_path).")
+        raise ValueError(
+            "Either use --pack OR provide --meta and --ckpt (and tokenizer via meta or --tokenizer_path)."
+        )
 
     meta = load_json(args.meta)
 
@@ -238,23 +245,34 @@ def main() -> None:
     tok_path = resolve_tokenizer_path(args.meta, tok_path_raw)
     tokenizer = Tokenizer.from_file(tok_path)
 
-    # Load checkpoint
+    # -----------------------
+    # Load checkpoint + config (prefer ckpt model_config)
+    # -----------------------
     ckpt = torch.load(args.ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    arch = infer_arch_from_state_dict(sd)
+    model_cfg = ckpt.get("model_config", None)
+    if model_cfg is not None and isinstance(model_cfg, dict) and len(model_cfg) > 0:
+        cfg_dict = dict(model_cfg)
+    else:
+        # fallback legacy (older ckpts)
+        arch = infer_arch_from_state_dict(sd)
+        cfg_dict = {
+            "vocab_size": arch["vocab_size"],
+            "d_model": arch["d_model"],
+            "n_layers": arch["n_layers"],
+            "n_heads": args.n_heads,
+            "max_seq_len": arch["max_seq_len"],
+            "dropout": 0.0,
+        }
 
-    if arch["d_model"] % args.n_heads != 0:
-        raise ValueError(f"d_model={arch['d_model']} must be divisible by n_heads={args.n_heads}")
+    # Safety: if legacy path, validate divisibility
+    if int(cfg_dict["d_model"]) % int(cfg_dict["n_heads"]) != 0:
+        raise ValueError(
+            f"d_model={cfg_dict['d_model']} must be divisible by n_heads={cfg_dict['n_heads']}"
+        )
 
-    cfg = GPTConfig(
-        vocab_size=arch["vocab_size"],
-        d_model=arch["d_model"],
-        n_layers=arch["n_layers"],
-        n_heads=args.n_heads,
-        max_seq_len=arch["max_seq_len"],
-        dropout=0.0,
-    )
+    cfg = GPTConfig(**cfg_dict)
 
     device = torch.device(args.device)
     model = GPTModel(cfg).to(device)
@@ -269,7 +287,7 @@ def main() -> None:
 
     model.eval()
 
-    # ✅ Policy guard: temperature is irrelevant in greedy mode.
+    # ✅ Policy guard: temperature irrelevant in greedy mode.
     if args.top_k == 0 and args.temperature != 1.0:
         print(
             f"[INFO] Greedy mode (top_k=0): ignoring temperature={args.temperature}. "
@@ -279,6 +297,9 @@ def main() -> None:
     else:
         temperature = float(args.temperature)
 
+    # -----------------------
+    # Tokenize + Generate
+    # -----------------------
     enc = tokenizer.encode(args.prompt)
     input_ids = torch.tensor([enc.ids], dtype=torch.long, device=device)
 
@@ -288,14 +309,13 @@ def main() -> None:
         model=model,
         input_ids=input_ids,
         max_new_tokens=args.max_new_tokens,
-        block_size=arch["max_seq_len"],
+        block_size=int(cfg.max_seq_len),
         temperature=temperature,
         top_k=int(args.top_k),
         eos_id=eos_id,
     )
 
-    text = tokenizer.decode(out_ids[0].tolist())
-    print(text)
+    print(tokenizer.decode(out_ids[0].tolist()))
 
 
 if __name__ == "__main__":
