@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple, Union, List, Any
+from typing import Optional, Tuple, Union, List, Any, Dict
 
 import torch
 import torch.nn.functional as F
@@ -85,7 +85,9 @@ class Trainer:
                 raise ValueError(f"Model output dict missing 'logits'. keys={list(out.keys())}")
             logits = out["logits"]
             if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
-                raise ValueError(f"out['logits'] must be 3D Tensor. Got: {type(logits)} shape={getattr(logits,'shape',None)}")
+                raise ValueError(
+                    f"out['logits'] must be 3D Tensor. Got: {type(logits)} shape={getattr(logits,'shape',None)}"
+                )
             return logits
 
         # direct tensor
@@ -301,13 +303,44 @@ class Trainer:
         val_loss: Optional[float] = None,
     ) -> Path:
         ckpt_path = self.ckpt_dir / filename
+
+        # ---- training_config (as dict) ----
+        training_config: Dict[str, Any] = self.config.__dict__
+
+        # ---- model_config (self-contained for inference) ----
+        # We try to read a config object from the model. Common patterns:
+        #   - model.config
+        #   - model.cfg
+        # If none exists, we gracefully store an empty dict.
+        model_cfg = getattr(self.model, "config", None)
+        if model_cfg is None:
+            model_cfg = getattr(self.model, "cfg", None)
+
+        model_config: Dict[str, Any] = {}
+        if model_cfg is not None:
+            # NOTE: init_std and tie_weights are especially useful for reproducibility and
+            #       for documenting that init is linked to weight tying in GPT-style models.
+            model_config = {
+                "vocab_size": int(getattr(model_cfg, "vocab_size")),
+                "d_model": int(getattr(model_cfg, "d_model")),
+                "n_layers": int(getattr(model_cfg, "n_layers")),
+                "n_heads": int(getattr(model_cfg, "n_heads")),
+                "max_seq_len": int(getattr(model_cfg, "max_seq_len")),
+                "dropout": float(getattr(model_cfg, "dropout")),
+                "init_std": float(getattr(model_cfg, "init_std", 0.02)),
+                "tie_weights": bool(getattr(model_cfg, "tie_weights", True)),
+            }
+
         payload = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "epoch": epoch,
             "global_step": global_step,
             "val_loss": val_loss,
-            "training_config": self.config.__dict__,
+            "training_config": training_config,
+            # ✅ NEW: make ckpt self-contained for inference
+            "model_config": model_config,
         }
+
         torch.save(payload, ckpt_path)
         return ckpt_path
