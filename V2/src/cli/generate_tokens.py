@@ -174,7 +174,6 @@ def build_banned_ids(
 
     if ban_replacement:
         # Ban tokens that decode to Unicode replacement char '�'
-        # This is the exact symptom you're seeing (id=106 -> '�').
         for i in range(int(vocab_size)):
             try:
                 s = tokenizer.decode([i])
@@ -183,7 +182,6 @@ def build_banned_ids(
             if "�" in s:
                 banned.append(int(i))
 
-    # de-dupe
     return sorted(set(banned))
 
 
@@ -202,16 +200,20 @@ def generate(
     banned_ids: Optional[List[int]] = None,
     debug_next: int = 0,
     tokenizer: Optional[Tokenizer] = None,
+    stop_at_period: bool = False,
+    period_id: int = 19,
 ) -> torch.Tensor:
     """
     Decoding policy:
       - top_k == 0  -> GREEDY (deterministic). temperature ignored.
       - top_k > 0   -> top-k sampling. temperature applies.
+    Stop policy:
+      - Stop on eos_id (if provided)
+      - Optionally stop when '.' token appears (period_id), after min_new_tokens
     """
     model.eval()
     greedy = (top_k == 0)
 
-    # Pre-calc banned ids tensor for speed/device correctness
     banned_tensor = None
     if banned_ids and len(banned_ids) > 0:
         banned_tensor = torch.tensor(banned_ids, dtype=torch.long, device=input_ids.device)
@@ -228,10 +230,9 @@ def generate(
         if eos_id is not None and t < int(min_new_tokens):
             logits[:, int(eos_id)] = -1e10
 
-        # 3) Repetition penalty (deterministic)
+        # 3) Repetition penalty
         rp = float(repetition_penalty)
         if rp != 1.0:
-            # Apply to tokens already generated in the sequence
             uniq = torch.unique(input_ids[0])  # batch=1 assumed for CLI
             for tid in uniq.tolist():
                 tid = int(tid)
@@ -241,11 +242,10 @@ def generate(
                 else:
                     logits[0, tid] = val * rp
 
-        # 4) No-repeat ngram (deterministic)
+        # 4) No-repeat ngram
         n = int(no_repeat_ngram)
         if n > 0 and input_ids.size(1) >= n:
             seq = input_ids[0].tolist()
-            # collect all ngrams seen
             seen = {}
             for i in range(len(seq) - n + 1):
                 prefix = tuple(seq[i:i + n - 1])
@@ -284,8 +284,14 @@ def generate(
 
         input_ids = torch.cat([input_ids, next_id], dim=1)
 
+        # ✅ Stop on EOS (always)
         if eos_id is not None and int(next_id.item()) == int(eos_id):
             break
+
+        # ✅ Optional: stop on '.' after min_new_tokens
+        if stop_at_period and t >= int(min_new_tokens) - 1:
+            if int(next_id.item()) == int(period_id):
+                break
 
     return input_ids
 
@@ -300,69 +306,46 @@ def main() -> None:
     )
 
     # Pack mode
-    ap.add_argument(
-        "--pack",
-        type=str,
-        default=None,
-        help="Path to inference_pack directory. If set, auto-resolves meta/ckpt/tokenizer.",
-    )
+    ap.add_argument("--pack", type=str, default=None)
 
-    # Legacy inputs (still supported)
-    ap.add_argument("--meta", type=str, help="Path to meta.json for the tokenized dataset.")
-    ap.add_argument("--ckpt", type=str, help="Path to checkpoint .pt file.")
+    # Legacy inputs
+    ap.add_argument("--meta", type=str)
+    ap.add_argument("--ckpt", type=str)
 
-    ap.add_argument("--prompt", type=str, required=True, help="Prompt text to generate from.")
-    ap.add_argument("--device", type=str, default="cpu", help="cpu | mps | cuda")
-    ap.add_argument("--max_new_tokens", type=int, default=128, help="How many new tokens to generate.")
+    ap.add_argument("--prompt", type=str, required=True)
+    ap.add_argument("--device", type=str, default="cpu")
+    ap.add_argument("--max_new_tokens", type=int, default=128)
 
-    # Decoding controls (default greedy)
-    ap.add_argument(
-        "--top_k",
-        type=int,
-        default=0,
-        help="0 = greedy (deterministic, recommended for eval). >0 = top-k sampling.",
-    )
-    ap.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="Sampling temperature (only used when top_k > 0). For greedy eval keep 1.0.",
-    )
-
-    ap.add_argument("--seed", type=int, default=42, help="Only affects sampling (top_k > 0).")
+    # Decoding controls
+    ap.add_argument("--top_k", type=int, default=0)
+    ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--seed", type=int, default=42)
 
     # Anti-loop / determinism
-    ap.add_argument("--repetition_penalty", type=float, default=1.0, help="1.0 disables. Try 1.1–1.2.")
-    ap.add_argument("--no_repeat_ngram", type=int, default=0, help="0 disables. Try 3.")
+    ap.add_argument("--repetition_penalty", type=float, default=1.0)
+    ap.add_argument("--no_repeat_ngram", type=int, default=0)
 
-    # Macro-safe generation guards
-    ap.add_argument("--min_new_tokens", type=int, default=8, help="Forbid EOS until at least N new tokens.")
-    ap.add_argument("--forbid_special", type=int, default=1, help="1=yes ban pad/bos/instr/resp during gen.")
-    ap.add_argument("--ban_replacement", type=int, default=1, help="1=yes ban tokens that decode to '�'.")
-    ap.add_argument("--debug_next", type=int, default=0, help="Print first N generated tokens (id + token).")
+    # Guards
+    ap.add_argument("--min_new_tokens", type=int, default=8)
+    ap.add_argument("--forbid_special", type=int, default=1)
+    ap.add_argument("--ban_replacement", type=int, default=1)
+    ap.add_argument("--debug_next", type=int, default=0)
 
-    # Only used if ckpt lacks model_config
-    ap.add_argument(
-        "--n_heads",
-        type=int,
-        default=4,
-        help="Legacy only: used when checkpoint lacks model_config. Must match training.",
-    )
+    # ✅ Short-answer stop
+    ap.add_argument("--stop_at_period", type=int, default=1, help="1=yes stop when '.' is generated (after min_new_tokens).")
+    ap.add_argument("--period_id", type=int, default=19, help="Token id for '.' (default 19 for your tokenizer).")
+
+    # Legacy config
+    ap.add_argument("--n_heads", type=int, default=4)
 
     # Tokenizer override
-    ap.add_argument(
-        "--tokenizer_path",
-        type=str,
-        default=None,
-        help="Optional override path to tokenizer.json. If not set, uses meta.json tokenizer_path.",
-    )
+    ap.add_argument("--tokenizer_path", type=str, default=None)
 
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
-    # Resolve pack
     if args.pack:
-        meta_path, ckpt_path, tok_path, _cfg_path = resolve_pack(args.pack)
+        meta_path, ckpt_path, tok_path, _ = resolve_pack(args.pack)
         args.meta = meta_path
         args.ckpt = ckpt_path
         args.tokenizer_path = tok_path
@@ -370,7 +353,6 @@ def main() -> None:
     if not args.meta or not args.ckpt:
         raise ValueError("Either use --pack OR provide --meta and --ckpt.")
 
-    # Load meta + tokenizer
     meta = load_json(args.meta)
     tok_path_raw = args.tokenizer_path or meta["tokenizer_path"]
     tok_path = resolve_tokenizer_path(args.meta, tok_path_raw)
@@ -379,15 +361,12 @@ def main() -> None:
     special_ids = meta.get("special_ids", {})
     eos_id = special_ids.get("eos", None)
 
-    # Load checkpoint
     ckpt = torch.load(args.ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    # Prefer ckpt model_config; fallback to inference from sd
     cfg_dict = cfg_from_ckpt_or_fallback(ckpt, sd, legacy_n_heads=args.n_heads)
     cfg = GPTConfig(**cfg_dict)
 
-    # Build model
     device = torch.device(args.device)
     model = GPTModel(cfg).to(device)
 
@@ -401,17 +380,12 @@ def main() -> None:
 
     model.eval()
 
-    # Greedy guard: temperature irrelevant
     if args.top_k == 0 and args.temperature != 1.0:
-        print(
-            f"[INFO] Greedy mode (top_k=0): ignoring temperature={args.temperature}. "
-            "Use --top_k > 0 to enable sampling."
-        )
+        print(f"[INFO] Greedy mode (top_k=0): ignoring temperature={args.temperature}.")
         temperature = 1.0
     else:
         temperature = float(args.temperature)
 
-    # Build banned ids list deterministically
     banned_ids = build_banned_ids(
         tokenizer=tokenizer,
         special_ids={k: int(v) for k, v in special_ids.items()},
@@ -420,7 +394,6 @@ def main() -> None:
         vocab_size=int(cfg.vocab_size),
     )
 
-    # Tokenize + generate
     enc = tokenizer.encode(args.prompt)
     input_ids = torch.tensor([enc.ids], dtype=torch.long, device=device)
 
@@ -438,6 +411,8 @@ def main() -> None:
         banned_ids=banned_ids,
         debug_next=int(args.debug_next),
         tokenizer=tokenizer,
+        stop_at_period=bool(int(args.stop_at_period)),
+        period_id=int(args.period_id),
     )
 
     print(tokenizer.decode(out_ids[0].tolist()))
