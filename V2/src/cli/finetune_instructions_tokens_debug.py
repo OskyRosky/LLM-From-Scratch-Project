@@ -1,106 +1,137 @@
+# src/cli/finetune_instructions_tokens_debug.py
+
 import argparse
 import json
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.model.gpt import GPTModel, GPTConfig
 from src.data.instruction_token_dataset import InstructionTokenDataset
+from src.training.losses import language_modeling_loss
 
 
-def lm_loss_ignore_pad(logits: torch.Tensor, targets: torch.Tensor, pad_id: int) -> torch.Tensor:
-    B, T, V = logits.shape
-    logits_2d = logits.reshape(B * T, V)
-    targets_1d = targets.reshape(B * T)
+def load_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    targets_1d = targets_1d.clone()
-    targets_1d[targets_1d == pad_id] = -100
-    return F.cross_entropy(logits_2d, targets_1d, ignore_index=-100)
+
+def cycle(dataloader):
+    """Infinite dataloader iterator (never raises StopIteration)."""
+    while True:
+        for batch in dataloader:
+            yield batch
 
 
 def main():
-    ap = argparse.ArgumentParser("Debug instruction fine-tune (token-level)")
-    ap.add_argument("--meta", required=True)
-    ap.add_argument("--tokenizer_path", required=True)
-    ap.add_argument("--base_ckpt", required=True)
-    ap.add_argument("--jsonl", required=True)
-    ap.add_argument("--out_dir", required=True)
+    ap = argparse.ArgumentParser("Debug instruction-tuning (token-level)")
+    ap.add_argument("--meta", type=str, required=True)
+    ap.add_argument("--tokenizer_path", type=str, required=True)
+    ap.add_argument("--base_ckpt", type=str, required=True)
+    ap.add_argument("--jsonl", type=str, required=True)
+    ap.add_argument("--out_dir", type=str, required=True)
 
-    ap.add_argument("--seq_len", type=int, default=256)
-    ap.add_argument("--batch_size", type=int, default=4)
+    ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--steps", type=int, default=50)
+    ap.add_argument("--batch_size", type=int, default=4)
+    ap.add_argument("--seq_len", type=int, default=256)
+
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--weight_decay", type=float, default=0.01)
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
+
     args = ap.parse_args()
-
     torch.manual_seed(args.seed)
-    device = torch.device(args.device)
 
-    meta = json.loads(Path(args.meta).read_text(encoding="utf-8"))
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = load_json(args.meta)
     pad_id = int(meta["special_ids"]["pad"])
 
+    # -----------------------
+    # Dataset + DataLoader
+    # -----------------------
     ds = InstructionTokenDataset(
         jsonl_path=args.jsonl,
         tokenizer_json_path=args.tokenizer_path,
-        seq_len=args.seq_len,
+        seq_len=int(args.seq_len),
         pad_id=pad_id,
     )
-    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
+    if len(ds) == 0:
+        raise ValueError(
+            f"Instruction dataset is empty: {args.jsonl}. "
+            "Check file path and JSONL format."
+        )
+
+    # ✅ critical: drop_last=False so small datasets still yield batches
+    dl = DataLoader(
+        ds,
+        batch_size=int(args.batch_size),
+        shuffle=True,
+        drop_last=False,
+    )
+
+    if len(dl) == 0:
+        raise ValueError(
+            f"DataLoader produced 0 batches. len(ds)={len(ds)} batch_size={args.batch_size}. "
+            "Fix by lowering --batch_size (<= len(dataset)) or keep drop_last=False."
+        )
+
+    it = cycle(dl)
+
+    # -----------------------
+    # Load base checkpoint
+    # -----------------------
     ckpt = torch.load(args.base_ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
+    # Prefer model_config if present
     model_cfg = ckpt.get("model_config", None)
     if isinstance(model_cfg, dict) and len(model_cfg) > 0:
         allowed = {"vocab_size", "d_model", "n_layers", "n_heads", "max_seq_len", "dropout"}
         cfg_dict = {k: model_cfg[k] for k in allowed if k in model_cfg}
-        cfg_dict["dropout"] = 0.0  # debug stable
     else:
-        cfg_dict = {
-            "vocab_size": 4096,
-            "d_model": 256,
-            "n_layers": 4,
-            "n_heads": 4,
-            "max_seq_len": args.seq_len,
-            "dropout": 0.0,
-        }
+        raise ValueError("Base checkpoint missing model_config. (Expected after your trainer patch.)")
+
+    # Override seq len for training if you want, but keep it consistent
+    cfg_dict["max_seq_len"] = int(args.seq_len)
 
     cfg = GPTConfig(**cfg_dict)
+
+    device = torch.device(args.device)
     model = GPTModel(cfg).to(device)
     model.load_state_dict(sd, strict=False)
     model.train()
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    it = iter(dl)
-    for step in range(1, args.steps + 1):
-        try:
-            x, y, _mask = next(it)
-        except StopIteration:
-            it = iter(dl)
-            x, y, _mask = next(it)
-
+    # -----------------------
+    # Train loop (debug)
+    # -----------------------
+    for step in range(1, int(args.steps) + 1):
+        x, y, mask = next(it)  # never stops
         x = x.to(device)
         y = y.to(device)
+        # mask currently not used by language_modeling_loss unless you implemented it; ok for debug.
 
         opt.zero_grad(set_to_none=True)
-        logits = model(x)  # (B,T,V)
-        loss = lm_loss_ignore_pad(logits, y, pad_id=pad_id)
+
+        logits = model(x)  # expected (B,T,V)
+        loss = language_modeling_loss(logits, y)
+
         loss.backward()
         opt.step()
 
-        if step == 1 or step % 10 == 0:
-            ppl = torch.exp(loss.detach()).item()
-            print(f"[step {step:>3}/{args.steps}] loss={loss.item():.4f} ppl={ppl:.2f}")
+        if step == 1 or step % 10 == 0 or step == int(args.steps):
+            print(f"[step {step}/{args.steps}] loss={float(loss.detach().item()):.4f}")
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # -----------------------
+    # Save debug checkpoint
+    # -----------------------
     out_ckpt = out_dir / "ckpt_instr_debug.pt"
-
     payload = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": opt.state_dict(),
@@ -109,12 +140,13 @@ def main():
         "val_loss": None,
         "training_config": {
             "task": "instruction_tuning_debug",
-            "steps": args.steps,
-            "batch_size": args.batch_size,
-            "learning_rate": args.lr,
-            "weight_decay": args.weight_decay,
+            "steps": int(args.steps),
+            "batch_size": int(args.batch_size),
+            "learning_rate": float(args.lr),
+            "weight_decay": float(args.weight_decay),
             "device": str(device),
-            "seed": args.seed,
+            "seed": int(args.seed),
+            "seq_len": int(args.seq_len),
         },
         "model_config": {
             "vocab_size": int(cfg.vocab_size),
