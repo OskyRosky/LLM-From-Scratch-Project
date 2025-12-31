@@ -167,9 +167,10 @@ def main():
     # Train loop (debug)
     # -----------------------
     for step in range(1, int(args.steps) + 1):
-        x, y, mask = next(it)  # never stops
-        x = x.to(device)
-        y = y.to(device)
+       x, y, mask = next(it)
+       x = x.to(device)
+       y = y.to(device)
+       mask = mask.to(device)
         # mask currently not used by language_modeling_loss unless you implemented it; ok for debug.
 
         opt.zero_grad(set_to_none=True)
