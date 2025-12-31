@@ -164,18 +164,33 @@ def generate(
     temperature: float = 1.0,
     top_k: int = 0,
     eos_id: Optional[int] = None,
+    repetition_penalty: float = 1.0,   # ✅ NEW
 ) -> torch.Tensor:
     """
     Decoding policy:
       - top_k == 0  -> GREEDY (deterministic). temperature ignored.
       - top_k > 0   -> top-k sampling. temperature applies.
+
+    Anti-loop (deterministic):
+      - repetition_penalty > 1.0 penalizes already-generated tokens.
+        Works in greedy and sampling.
     """
     model.eval()
     greedy = (top_k == 0)
 
+    rep_pen = float(repetition_penalty) if repetition_penalty is not None else 1.0
+    use_rep_pen = rep_pen > 1.0
+
     for _ in range(max_new_tokens):
         idx = input_ids[:, -block_size:]
         logits = model(idx)[:, -1, :]  # (B, V)
+
+        # ✅ Repetition penalty (per sample)
+        # Penalize tokens that already appeared in the generated sequence so far.
+        if use_rep_pen:
+            for b in range(logits.size(0)):
+                prev = input_ids[b].unique()
+                logits[b, prev] = logits[b, prev] / rep_pen
 
         if not greedy:
             logits = logits / max(float(temperature), 1e-6)
@@ -235,6 +250,14 @@ def main() -> None:
         type=float,
         default=1.0,
         help="Sampling temperature (only used when top_k > 0). For greedy eval keep 1.0.",
+    )
+
+    # ✅ NEW: deterministic anti-loop
+    ap.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=1.0,
+        help="Deterministic anti-loop. 1.0 = off. Try 1.1–1.2 for Spanish to reduce repetitions.",
     )
 
     # Only used if ckpt lacks model_config
@@ -321,6 +344,7 @@ def main() -> None:
         temperature=temperature,
         top_k=int(args.top_k),
         eos_id=eos_id,
+        repetition_penalty=float(args.repetition_penalty),
     )
 
     print(tokenizer.decode(out_ids[0].tolist()))
