@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 
 import torch
 
@@ -19,6 +20,12 @@ from src.cli.generate_tokens import (
     generate,
 )
 
+# FACTS (FAQ grounding)
+from src.inference.faq_fallback import faq_fact
+
+
+REFUSAL = "No tengo esa información en mi entrenamiento actual."
+
 
 @dataclass(frozen=True)
 class Assets:
@@ -31,13 +38,9 @@ class Assets:
 
 
 # -------------------------
-# Text cleaning (robusto pero simple)
+# Text cleaning
 # -------------------------
 def _try_fix_mojibake(s: str) -> str:
-    """
-    Arreglo best-effort para casos tipo 'JosÃ©' -> 'José'.
-    No siempre aplica; solo lo intenta si ve patrones típicos.
-    """
     if "Ã" not in s and "Â" not in s:
         return s
     try:
@@ -49,17 +52,51 @@ def _try_fix_mojibake(s: str) -> str:
 def _clean_text(s: str) -> str:
     s = _try_fix_mojibake(s)
 
-    # Normaliza espacios/saltos
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[ \t]+", " ", s)      # colapsa espacios
-    s = re.sub(r"\n{3,}", "\n\n", s)   # colapsa saltos múltiples
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
     s = s.strip()
 
-    # Arreglos típicos de puntuación
-    s = s.replace("..", ".")  # “París..”
-    s = re.sub(r"\s+\.", ".", s)  # "hola ." -> "hola."
-
+    s = s.replace("..", ".")
+    s = re.sub(r"\s+\.", ".", s)
     return s
+
+
+# -------------------------
+# Private guard (simple + efectivo)
+# -------------------------
+_PRIVATE_KEYWORDS = [
+    "mi ", "mis ", "mío", "mía",
+    "favorito", "favorita",
+    "anime", "jefes", "jefe",
+    "hermano", "hermana",
+    "edad",
+    "perros", "perro",  # ojo: aquí solo para "mis perros"/"nombre de mis perros"
+    "nombre de mis", "nombres de mis",
+]
+
+def is_private_question(text: str) -> bool:
+    t = (text or "").strip().lower()
+
+    # patrones obvios de info personal
+    if "mi " in t or "mis " in t:
+        # "mi anime", "mis perros", "mis 3 jefes", etc.
+        if any(k in t for k in ["anime", "jef", "hermano", "edad", "perro", "nombre", "nombres", "favorit"]):
+            return True
+
+    # "cuáles son los tres jefes que he tenido"
+    if "que he tenido" in t and ("jefe" in t or "jefes" in t):
+        return True
+
+    # "nombre de mis X"
+    if "nombre de mis" in t or "nombres de mis" in t:
+        return True
+
+    # "mi anime favorito"
+    if "anime" in t and "favorit" in t:
+        return True
+
+    return False
 
 
 # -------------------------
@@ -69,22 +106,8 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
 # -------------------------
-# Asset loading (cacheado correctamente por parámetros)
+# Asset loading (cacheado)
 # -------------------------
 @lru_cache(maxsize=4)
 def _load_assets_once(
@@ -131,14 +154,33 @@ def _load_assets_once(
 
 
 def clear_cache() -> None:
-    """Forzar recarga de modelo/tokenizer (útil si cambias checkpoints a mano)."""
     _load_assets_once.cache_clear()
+
+
+# -------------------------
+# Internal: build prompt
+# -------------------------
+def _build_prompt(user_prompt: str, fact: str) -> str:
+    up = (user_prompt or "").strip()
+    f = (fact or "").strip()
+
+    if f:
+        # Forzamos frase completa y “humana”
+        return (
+            "<instr> Responde de forma breve, clara y en una oración completa. "
+            "Usa únicamente este hecho verificado como base.\n"
+            f"HECHO: {f}\n"
+            f"PREGUNTA: {up}\n"
+            "<resp>"
+        )
+
+    return f"<instr> {up}<resp>"
 
 
 # -------------------------
 # Public API
 # -------------------------
-def answer(
+def answer_with_meta(
     user_prompt: str,
     *,
     meta_path: Optional[str] = None,
@@ -157,15 +199,21 @@ def answer(
     n_heads_legacy: int = 4,
     forbid_special: int = 1,
     ban_replacement: int = 1,
-) -> str:
-    """
-    API estable para Streamlit:
-      - Carga model+tokenizer una sola vez (cache)
-      - Genera y devuelve solo el texto generado (sin prompt)
-      - Limpieza robusta del output
-    """
+) -> Tuple[str, Dict[str, object]]:
+    # 0) Private guard
+    if is_private_question(user_prompt):
+        return REFUSAL, {
+            "used_private_guard": True,
+            "used_fact": False,
+            "fact": "",
+            "took_ms": 0.0,
+        }
 
-    # Defaults por env (para Streamlit)
+    # 1) Fact lookup (returns "" si no hay)
+    fact = faq_fact(user_prompt) or ""
+    has_fact = bool(fact.strip())
+
+    # Defaults por env
     meta_path = meta_path or _env("LLM_META", "models/tokenized/oscar_bpe_v4/meta.json")
     tokenizer_path = tokenizer_path or _env("LLM_TOKENIZER", "models/tokenizers/oscar_bpe_v4/tokenizer.json")
     ckpt_path = ckpt_path or _env("LLM_CKPT", "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt")
@@ -184,13 +232,14 @@ def answer(
         ban_replacement=int(ban_replacement),
     )
 
-    prompt = f"<instr> {user_prompt}<resp>"
+    prompt = _build_prompt(user_prompt, fact=fact)
     enc = assets.tokenizer.encode(prompt)
     input_ids = torch.tensor([enc.ids], dtype=torch.long, device=torch.device(assets.device))
 
-    # Greedy => temperatura no aplica (consistente con CLI)
     greedy = (int(top_k) == 0)
     temp = 1.0 if greedy else float(temperature)
+
+    t0 = time.perf_counter()
 
     out_ids = generate(
         model=assets.model,
@@ -210,8 +259,21 @@ def answer(
         period_id=int(period_id),
     )
 
+    took_ms = (time.perf_counter() - t0) * 1000.0
+
     full = out_ids[0].tolist()
     gen_only = full[len(enc.ids):]
     text = assets.tokenizer.decode(gen_only)
+    text = _clean_text(text)
 
-    return _clean_text(text)
+    return text, {
+        "used_private_guard": False,
+        "used_fact": has_fact,
+        "fact": fact.strip(),
+        "took_ms": round(float(took_ms), 2),
+    }
+
+
+def answer(*args, **kwargs) -> str:
+    text, _meta = answer_with_meta(*args, **kwargs)
+    return text

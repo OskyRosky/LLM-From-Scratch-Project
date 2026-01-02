@@ -1,37 +1,41 @@
-# src/inference/faq_fallback.py
-
 from difflib import SequenceMatcher
 
-FAQ = {
-    "perro_canino": "Sí, los perros son caninos. Pertenecen a la familia de los cánidos.",
-    "gato_felino": "Sí, los gatos son felinos. Pertenecen a la familia de los félidos.",
+# FACTS: devolver SIEMPRE una frase completa (hecho verificado)
+FAQ_FACTS = {
+    "perro_canino": "Los perros pertenecen a la familia de los cánidos.",
+    "gato_felino": "Los gatos pertenecen a la familia de los félidos.",
     "capital_cr": "La capital de Costa Rica es San José.",
+    "capital_fr": "La capital de Francia es París.",
 }
 
 def similar(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-def faq_match(prompt: str):
+def faq_fact(prompt: str) -> str:
+    """
+    Devuelve un FACT (string) si hay match.
+    Si no hay match, devuelve string vacío "" (nada de None).
+    """
     p = prompt.lower().strip()
 
-    # -----------------------------
-    # 1. PREGUNTA DE PERROS
-    # -----------------------------
+    # 1) Perros / cánidos
     perro_keywords = ["perro", "perros", "canino", "caninos", "cánido", "cánidos"]
-    if any(k in p for k in perro_keywords) and similar(p, "los perros son caninos?") > 0.45:
-        return FAQ["perro_canino"]
+    if any(k in p for k in perro_keywords):
+        if similar(p, "los perros son caninos?") > 0.45 or "familia" in p:
+            return FAQ_FACTS["perro_canino"]
 
-    # -----------------------------
-    # 2. PREGUNTA DE GATOS
-    # -----------------------------
+    # 2) Gatos / félidos
     gato_keywords = ["gato", "gatos", "felino", "felinos", "félido", "félidos"]
-    if any(k in p for k in gato_keywords) and similar(p, "los gatos son felinos?") > 0.45:
-        return FAQ["gato_felino"]
+    if any(k in p for k in gato_keywords):
+        if similar(p, "los gatos son felinos?") > 0.45 or "familia" in p:
+            return FAQ_FACTS["gato_felino"]
 
-    # -----------------------------
-    # 3. CAPITAL DE COSTA RICA
-    # -----------------------------
+    # 3) Capital Costa Rica
     if "capital" in p and ("costa rica" in p or "costarricense" in p):
-        return FAQ["capital_cr"]
+        return FAQ_FACTS["capital_cr"]
 
-    return None
+    # 4) Capital Francia
+    if "capital" in p and ("francia" in p or "francesa" in p):
+        return FAQ_FACTS["capital_fr"]
+
+    return ""
