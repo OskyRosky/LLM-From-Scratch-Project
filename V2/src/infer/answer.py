@@ -1,3 +1,4 @@
+# src/infer/answer.py
 from __future__ import annotations
 
 import os
@@ -134,6 +135,39 @@ _REFUSE = "No tengo esa información en mi entrenamiento actual."
 
 
 # -----------------------------------------------------------------------------
+# Unknown guard (anti-derrail en preguntas sin FACT)
+# -----------------------------------------------------------------------------
+_ANCHOR_WORDS = [
+    "gato", "gatos", "felino", "felinos", "félido", "félidos",
+    "perro", "perros", "canino", "caninos", "cánido", "cánidos",
+    "capital", "costa rica", "francia",
+]
+
+_TOPIC_HINTS = [
+    "fotosíntesis", "relatividad", "cuántica", "quantica",
+    "sistema solar", "planeta", "luna",
+    "machine learning", "aprendizaje automático", "llm",
+    "población", "distancia", "gdp",
+]
+
+def _unknown_guard(question: str, answer: str) -> bool:
+    """
+    True => la salida parece fuera de tema (derailed),
+    así que mejor devolvemos _REFUSE.
+    """
+    q = question.lower()
+    a = answer.lower()
+
+    if "no tengo esa información" in a:
+        return False
+
+    has_topic = any(t in q for t in _TOPIC_HINTS)
+    has_anchor = any(w in a for w in _ANCHOR_WORDS)
+
+    return bool(has_topic and has_anchor)
+
+
+# -----------------------------------------------------------------------------
 # Fact validation (anti-alucinación)
 # -----------------------------------------------------------------------------
 _JUNK_PATTERNS = [
@@ -142,14 +176,9 @@ _JUNK_PATTERNS = [
 ]
 
 def _fact_key(fact: str) -> str:
-    """
-    Extrae la pieza clave del hecho, p.ej:
-      'La capital de Francia es París.' -> 'París'
-    """
     m = re.search(r"\bes\s+(.+?)\.\s*$", fact.strip(), flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    # fallback: última palabra sin punto
     return fact.strip().rstrip(".").split()[-1].strip()
 
 def _looks_bad(answer: str) -> bool:
@@ -160,7 +189,6 @@ def _validate_against_fact(answer: str, fact: str) -> bool:
     key = _fact_key(fact)
     if not key:
         return False
-    # validación por inclusión simple (robusta para tiny)
     return key.lower() in answer.lower() and not _looks_bad(answer)
 
 
@@ -275,7 +303,6 @@ def answer_with_meta(
     forbid_special: int = 1,
     ban_replacement: int = 1,
 ) -> Tuple[str, Dict[str, Any]]:
-    # defaults por env
     meta_path = meta_path or _env("LLM_META", "models/tokenized/oscar_bpe_v4/meta.json")
     tokenizer_path = tokenizer_path or _env("LLM_TOKENIZER", "models/tokenizers/oscar_bpe_v4/tokenizer.json")
     ckpt_path = ckpt_path or _env("LLM_CKPT", "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt")
@@ -284,13 +311,14 @@ def answer_with_meta(
     if seed is not None:
         torch.manual_seed(int(seed))
 
-    # 1) Private guard (cero alucinación)
+    # 1) Private guard
     if is_private_question(user_prompt):
         return _REFUSE, {
             "used_private_guard": True,
             "used_fact": False,
             "fact": "",
             "fact_validation_fallback": False,
+            "unknown_guard_triggered": False,
             "took_ms": 0.0,
         }
 
@@ -305,14 +333,13 @@ def answer_with_meta(
         ban_replacement=int(ban_replacement),
     )
 
-    # 3) Fact (si existe)
+    # 3) Fact
     fact = faq_fact(user_prompt) or ""
     used_fact = bool(fact.strip())
 
     t0 = time.perf_counter()
 
     if used_fact:
-        # Prompt más estricto para “sonar LLM” pero anclado al hecho
         guided_prompt = (
             "Responde con UNA sola oración, breve y correcta. "
             "No agregues información extra.\n"
@@ -320,7 +347,6 @@ def answer_with_meta(
             f"PREGUNTA: {user_prompt}"
         )
 
-        # Parámetros más seguros para tiny
         ans = _generate_only(
             guided_prompt,
             assets=assets,
@@ -336,9 +362,6 @@ def answer_with_meta(
 
         took_ms = (time.perf_counter() - t0) * 1000.0
 
-        # Si el modelo devuelve solo “París.” o se va por otro lado, forzamos una salida humana correcta
-        #  - Si no valida contra el hecho -> devolvemos el fact directamente (0 alucinación)
-        #  - Si valida pero viene demasiado corto -> devolvemos el fact para que “suene” completo
         fact_ok = _validate_against_fact(ans, fact)
         too_short = (ans.strip().rstrip(".") == _fact_key(fact).strip()) or (len(ans.strip()) <= 8)
 
@@ -348,6 +371,7 @@ def answer_with_meta(
                 "used_fact": True,
                 "fact": fact,
                 "fact_validation_fallback": True,
+                "unknown_guard_triggered": False,
                 "took_ms": round(took_ms, 2),
             }
 
@@ -356,6 +380,7 @@ def answer_with_meta(
             "used_fact": True,
             "fact": fact,
             "fact_validation_fallback": False,
+            "unknown_guard_triggered": False,
             "took_ms": round(took_ms, 2),
         }
 
@@ -374,10 +399,21 @@ def answer_with_meta(
     )
     took_ms = (time.perf_counter() - t0) * 1000.0
 
+    if _unknown_guard(user_prompt, ans):
+        return _REFUSE, {
+            "used_private_guard": False,
+            "used_fact": False,
+            "fact": "",
+            "fact_validation_fallback": False,
+            "unknown_guard_triggered": True,
+            "took_ms": round(took_ms, 2),
+        }
+
     return ans, {
         "used_private_guard": False,
         "used_fact": False,
         "fact": "",
         "fact_validation_fallback": False,
+        "unknown_guard_triggered": False,
         "took_ms": round(took_ms, 2),
     }
