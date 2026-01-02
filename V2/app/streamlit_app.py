@@ -14,7 +14,6 @@ if str(ROOT) not in sys.path:
 
 from src.infer.answer import answer_with_meta, clear_cache  # noqa: E402
 
-
 # ---------------------------------------------------------------------
 # Config por env (recomendado)
 # ---------------------------------------------------------------------
@@ -25,7 +24,6 @@ DEFAULT_CKPT = os.getenv(
     "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt",
 )
 DEFAULT_DEVICE = os.getenv("LLM_DEVICE", "mps")
-
 
 # ---------------------------------------------------------------------
 # Streamlit basic page
@@ -43,9 +41,9 @@ st.markdown(
 Modelo **token-level (BPE)** entrenado desde cero y luego **instruction-tuned**.
 
 Flujo:
-1) Si hay **hecho verificado** (FAQ -> FACT), el LLM responde anclado al hecho.
+1) Si hay **hecho verificado** (FAQ -> FACT), el LLM responde **anclado** al hecho (y si hace falta, cae al hecho exacto).
 2) Si no hay hecho, el LLM responde normal.
-3) Si la pregunta es **privada** o el modelo se **descarrila**, se rechaza de forma honesta.
+3) Si la pregunta es **privada** o el modelo se **descarrila / no tiene base**, se rechaza de forma honesta.
 """
 )
 
@@ -64,7 +62,7 @@ device = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Decoding (solo aplica fuerte en 'sin fact')")
+st.sidebar.subheader("Decoding")
 
 max_new_tokens = st.sidebar.slider("max_new_tokens", 10, 200, 60, 5)
 min_new_tokens = st.sidebar.slider("min_new_tokens", 1, 40, 2, 1)
@@ -72,9 +70,7 @@ min_new_tokens = st.sidebar.slider("min_new_tokens", 1, 40, 2, 1)
 stop_at_period = st.sidebar.checkbox("stop_at_period (.)", value=True)
 period_id = st.sidebar.number_input("period_id", value=19, step=1)
 
-# Defaults recomendados:
-# - Si quieres greedy: top_k=0
-# - Para 'sin fact' suele funcionar mejor top_k>0 con temperatura moderada
+# Defaults recomendados para mejorar “sin fact”
 top_k = st.sidebar.slider("top_k (0 = greedy)", 0, 100, 30, 1)
 temperature = st.sidebar.slider("temperature (solo si top_k>0)", 0.0, 1.5, 0.8, 0.05)
 
@@ -85,7 +81,6 @@ st.sidebar.markdown("---")
 if st.sidebar.button("🔁 Clear cache (recargar modelo)"):
     clear_cache()
     st.sidebar.success("Cache limpiado. La próxima respuesta recarga assets.")
-
 
 # ---------------------------------------------------------------------
 # Main: test questions
@@ -103,6 +98,7 @@ opciones = [
     "Explica la fotosíntesis en una frase.",
     "Explica la relatividad en una frase.",
     "¿Qué es un LLM?",
+    "¿Qué es machine learning?",
 ]
 
 pregunta_base = st.radio("Elige una pregunta:", opciones, index=0)
@@ -113,29 +109,43 @@ prompt = st.text_area(
     height=90,
 )
 
-
 # ---------------------------------------------------------------------
 # Helpers UI
 # ---------------------------------------------------------------------
 def _badge(meta: dict) -> str:
-    if meta.get("used_private_guard"):
+    """
+    Decide el “estado” usando flags + refuse_reason (para cubrir
+    casos donde el modelo ya devolvió “No tengo...” y lo normalizamos).
+    """
+    reason = (meta.get("refuse_reason") or "").strip()
+
+    if meta.get("used_private_guard") or reason == "private":
         return "🔒 No tengo info personal"
-    if meta.get("unknown_guard_triggered"):
+
+    if meta.get("unknown_guard_triggered") or reason in ("unknown_derail", "unknown_no_knowledge"):
         return "⚠️ No tengo base suficiente para responder con precisión"
+
     if meta.get("used_fact"):
+        if meta.get("fact_validation_fallback"):
+            return "✅ Hecho verificado (fallback exacto)"
         return "✅ Hecho verificado + respuesta generada"
+
     return "🤖 Respuesta generada por el modelo"
 
 
-def _debug_line(meta: dict) -> str:
-    took = meta.get("took_ms", 0.0)
-    used_fact = meta.get("used_fact", False)
-    fallback = meta.get("fact_validation_fallback", False)
-    reason = meta.get("refuse_reason", "")
-    return (
-        f"badge={_badge(meta)} | took_ms={took} | "
-        f"used_fact={used_fact} | fact_fallback={fallback} | refuse_reason={reason}"
-    )
+def _status_help(meta: dict) -> str:
+    reason = (meta.get("refuse_reason") or "").strip()
+    if meta.get("used_private_guard") or reason == "private":
+        return "La pregunta pide información personal del usuario, y este sistema no la tiene."
+    if meta.get("unknown_guard_triggered") or reason == "unknown_derail":
+        return "El modelo se descarriló en un tema general; se bloquea para evitar alucinaciones."
+    if reason == "unknown_no_knowledge":
+        return "El modelo no tiene base suficiente para responder eso con precisión."
+    if meta.get("used_fact") and meta.get("fact_validation_fallback"):
+        return "Se devolvió el hecho exacto para asegurar 0 alucinación."
+    if meta.get("used_fact"):
+        return "Respuesta generada, anclada a un hecho verificado."
+    return "Respuesta generada por el modelo."
 
 
 # ---------------------------------------------------------------------
@@ -167,19 +177,20 @@ if st.button("Generar respuesta"):
 
         st.markdown("### Estado")
         st.success(_badge(meta))
+        st.caption(_status_help(meta))
 
         st.caption(
             f"took_ms={meta.get('took_ms', 0.0)} | device={device} | "
             f"top_k={top_k} | temp={temperature} | max_new_tokens={max_new_tokens}"
         )
 
-        # Opcional: mostrar el FACT cuando existe (para demo/pro)
+        # Mostrar FACT si existe (útil para demo y verificación)
         if meta.get("used_fact") and meta.get("fact"):
-            st.markdown("### Hecho verificado (usado como ancla)")
+            st.markdown("### Hecho verificado (ancla)")
             st.code(meta["fact"])
 
-        # Debug corto (útil para ti)
         with st.expander("Debug (meta)"):
             st.write(meta)
+
 else:
     st.info("Elige una pregunta y pulsa **Generar respuesta**.")
