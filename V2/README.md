@@ -47,12 +47,13 @@ Typical relevant paths:
 
 ### 1) Create and activate venv
 ```bash
+
+
 cd V2
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-
+```
 
 
 
