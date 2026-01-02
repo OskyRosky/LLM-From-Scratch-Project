@@ -140,11 +140,17 @@ _REFUSE_UNKNOWN = "No tengo suficiente base en mi entrenamiento para responder e
 # Marcadores para detectar que “ya es rechazo”
 _REFUSE_MARKERS = [
     "no tengo información",              # cubre private
-    "no tengo esa información",          # cubre el texto típico del modelo
+    "no tengo esa información",          # texto típico del modelo
     "en mi entrenamiento actual",        # refuerzo del mismo caso
     "no tengo suficiente base",          # tu unknown unificado
+    "no tengo suficiente información",   # por compatibilidad con runs anteriores
     "no puedo responder",
 ]
+
+
+def _contains_refuse_marker(text: str) -> bool:
+    t = text.lower()
+    return any(m in t for m in _REFUSE_MARKERS)
 
 
 # -----------------------------------------------------------------------------
@@ -252,11 +258,6 @@ def _generate_only(
     return _clean_text(assets.tokenizer.decode(gen_only))
 
 
-def _contains_refuse_marker(text: str) -> bool:
-    t = text.lower()
-    return any(m in t for m in _REFUSE_MARKERS)
-
-
 # -----------------------------------------------------------------------------
 # Public APIs
 # -----------------------------------------------------------------------------
@@ -324,7 +325,10 @@ def answer_with_meta(
 ) -> Tuple[str, Dict[str, Any]]:
     meta_path = meta_path or _env("LLM_META", "models/tokenized/oscar_bpe_v4/meta.json")
     tokenizer_path = tokenizer_path or _env("LLM_TOKENIZER", "models/tokenizers/oscar_bpe_v4/tokenizer.json")
-    ckpt_path = ckpt_path or _env("LLM_CKPT", "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt")
+    ckpt_path = ckpt_path or _env(
+        "LLM_CKPT",
+        "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt",
+    )
     device = device or _env("LLM_DEVICE", "cpu")
 
     if seed is not None:
@@ -426,15 +430,15 @@ def answer_with_meta(
     # - unificamos el texto a _REFUSE_UNKNOWN
     # - seteamos refuse_reason para UI
     if _contains_refuse_marker(ans):
-    return _REFUSE_UNKNOWN, {
-        "used_private_guard": False,
-        "used_fact": False,
-        "fact": "",
-        "fact_validation_fallback": False,
-        "unknown_guard_triggered": False,
-        "refuse_reason": "unknown_no_knowledge",
-        "took_ms": round(took_ms, 2),
-    }
+        return _REFUSE_UNKNOWN, {
+            "used_private_guard": False,
+            "used_fact": False,
+            "fact": "",
+            "fact_validation_fallback": False,
+            "unknown_guard_triggered": False,
+            "refuse_reason": "unknown_no_knowledge",
+            "took_ms": round(took_ms, 2),
+        }
 
     # 4B) Unknown guard SOLO aquí (cuando se descarrila)
     if _unknown_guard(user_prompt, ans):
