@@ -49,6 +49,20 @@ def _try_fix_mojibake(s: str) -> str:
         return s
 
 
+
+def _dedupe_repeats(s: str) -> str:
+    # Colapsa repeticiones exactas del mismo segmento separado por espacios.
+    parts = [p.strip() for p in s.split(" ") if p.strip()]
+    if len(parts) < 6:
+        return s
+    # Caso típico: "San José. San José. San José."
+    if len(set(parts)) <= 3:
+        # reconstruye con el primer segmento hasta el primer punto
+        m = re.match(r"^(.+?\.)\s+\1(\s+\1)+\s*$", s.strip())
+        if m:
+            return m.group(1).strip()
+    return s
+
 def _clean_text(s: str) -> str:
     s = _try_fix_mojibake(s)
 
@@ -249,8 +263,8 @@ def answer_with_meta(
         temperature=float(temp),
         top_k=int(top_k),
         eos_id=assets.eos_id,
-        repetition_penalty=float(repetition_penalty),
-        no_repeat_ngram=int(no_repeat_ngram),
+        repetition_penalty=float(max(repetition_penalty, 1.15) if has_fact else repetition_penalty),
+        no_repeat_ngram=int(max(no_repeat_ngram, 3) if has_fact else no_repeat_ngram),
         min_new_tokens=int(max(min_new_tokens, 8) if has_fact else min_new_tokens),
         banned_ids=assets.banned_ids,
         debug_next=0,
@@ -265,6 +279,7 @@ def answer_with_meta(
     gen_only = full[len(enc.ids):]
     text = assets.tokenizer.decode(gen_only)
     text = _clean_text(text)
+    text = _dedupe_repeats(text)
 
     # Si hay HECHO y el modelo se desvía (tiny model), forzamos respuesta grounded
     if has_fact:
