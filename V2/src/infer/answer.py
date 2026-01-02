@@ -157,10 +157,6 @@ _TOPIC_HINTS = [
 ]
 
 def _unknown_guard(question: str, answer: str) -> bool:
-    """
-    True => la salida parece fuera de tema (derailed) en preguntas sin FACT.
-    En ese caso, devolvemos _REFUSE_UNKNOWN.
-    """
     q = question.lower()
     a = answer.lower()
 
@@ -171,7 +167,7 @@ def _unknown_guard(question: str, answer: str) -> bool:
     has_topic = any(t in q for t in _TOPIC_HINTS)
     anchor_hits = sum(1 for w in _ANCHOR_WORDS if w in a)
 
-    return bool(has_topic and has_anchor)
+    return bool(has_topic and anchor_hits >= 2)
 
 
 # -----------------------------------------------------------------------------
