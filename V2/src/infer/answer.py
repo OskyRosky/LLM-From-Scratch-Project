@@ -1,4 +1,3 @@
-# src/infer/answer.py
 from __future__ import annotations
 
 import os
@@ -6,12 +5,15 @@ import re
 import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 import torch
 
 from src.model.gpt import GPTModel, GPTConfig
 from src.infer.tokenizer_wrapper import load_tokenizer_and_specials
+
+# Hechos verificados (FAQ -> FACT, no respuesta final directa)
+from src.inference.faq_fallback import faq_fact
 
 # Reusar helpers validados
 from src.cli.generate_tokens import (
@@ -20,13 +22,10 @@ from src.cli.generate_tokens import (
     generate,
 )
 
-# FACTS (FAQ grounding)
-from src.inference.faq_fallback import faq_fact
 
-
-REFUSAL = "No tengo esa información en mi entrenamiento actual."
-
-
+# -----------------------------------------------------------------------------
+# Assets (cache)
+# -----------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Assets:
     model: GPTModel
@@ -34,95 +33,13 @@ class Assets:
     cfg: GPTConfig
     eos_id: Optional[int]
     banned_ids: List[int]
-    device: str  # keep original string for clarity
+    device: str
 
 
-# -------------------------
-# Text cleaning
-# -------------------------
-def _try_fix_mojibake(s: str) -> str:
-    if "Ã" not in s and "Â" not in s:
-        return s
-    try:
-        return s.encode("latin-1").decode("utf-8")
-    except Exception:
-        return s
-
-
-
-def _dedupe_repeats(s: str) -> str:
-    # Colapsa repeticiones exactas del mismo segmento separado por espacios.
-    parts = [p.strip() for p in s.split(" ") if p.strip()]
-    if len(parts) < 6:
-        return s
-    # Caso típico: "San José. San José. San José."
-    if len(set(parts)) <= 3:
-        # reconstruye con el primer segmento hasta el primer punto
-        m = re.match(r"^(.+?\.)\s+\1(\s+\1)+\s*$", s.strip())
-        if m:
-            return m.group(1).strip()
-    return s
-
-def _clean_text(s: str) -> str:
-    s = _try_fix_mojibake(s)
-
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    s = s.strip()
-
-    s = s.replace("..", ".")
-    s = re.sub(r"\s+\.", ".", s)
-    return s
-
-
-# -------------------------
-# Private guard (simple + efectivo)
-# -------------------------
-_PRIVATE_KEYWORDS = [
-    "mi ", "mis ", "mío", "mía",
-    "favorito", "favorita",
-    "anime", "jefes", "jefe",
-    "hermano", "hermana",
-    "edad",
-    "perros", "perro",  # ojo: aquí solo para "mis perros"/"nombre de mis perros"
-    "nombre de mis", "nombres de mis",
-]
-
-def is_private_question(text: str) -> bool:
-    t = (text or "").strip().lower()
-
-    # patrones obvios de info personal
-    if "mi " in t or "mis " in t:
-        # "mi anime", "mis perros", "mis 3 jefes", etc.
-        if any(k in t for k in ["anime", "jef", "hermano", "edad", "perro", "nombre", "nombres", "favorit"]):
-            return True
-
-    # "cuáles son los tres jefes que he tenido"
-    if "que he tenido" in t and ("jefe" in t or "jefes" in t):
-        return True
-
-    # "nombre de mis X"
-    if "nombre de mis" in t or "nombres de mis" in t:
-        return True
-
-    # "mi anime favorito"
-    if "anime" in t and "favorit" in t:
-        return True
-
-    return False
-
-
-# -------------------------
-# Config defaults via env
-# -------------------------
 def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
-# -------------------------
-# Asset loading (cacheado)
-# -------------------------
 @lru_cache(maxsize=4)
 def _load_assets_once(
     meta_path: str,
@@ -142,7 +59,7 @@ def _load_assets_once(
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    cfg_dict = cfg_from_ckpt_or_fallback(ckpt, sd, legacy_n_heads=n_heads_legacy)
+    cfg_dict = cfg_from_ckpt_or_fallback(ckpt, sd, legacy_n_heads=int(n_heads_legacy))
     cfg = GPTConfig(**cfg_dict)
 
     model = GPTModel(cfg).to(dev)
@@ -171,29 +88,173 @@ def clear_cache() -> None:
     _load_assets_once.cache_clear()
 
 
-# -------------------------
-# Internal: build prompt
-# -------------------------
-def _build_prompt(user_prompt: str, fact: str) -> str:
-    up = (user_prompt or "").strip()
-    f = (fact or "").strip()
-
-    if f:
-        # Forzamos frase completa y “humana”
-        return (
-            "<instr> Responde de forma breve, clara y en una oración completa. "
-            "Usa únicamente este hecho verificado como base.\n"
-            f"HECHO: {f}\n"
-            f"PREGUNTA: {up}\n"
-            "<resp>"
-        )
-
-    return f"<instr> {up}<resp>"
+# -----------------------------------------------------------------------------
+# Cleaning
+# -----------------------------------------------------------------------------
+def _try_fix_mojibake(s: str) -> str:
+    if "Ã" not in s and "Â" not in s:
+        return s
+    try:
+        return s.encode("latin-1").decode("utf-8")
+    except Exception:
+        return s
 
 
-# -------------------------
-# Public API
-# -------------------------
+def _clean_text(s: str) -> str:
+    s = _try_fix_mojibake(s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    s = s.strip()
+
+    # arreglos típicos
+    s = s.replace("..", ".")
+    s = re.sub(r"\s+\.", ".", s)
+
+    return s.strip()
+
+
+# -----------------------------------------------------------------------------
+# Guards
+# -----------------------------------------------------------------------------
+_PRIVATE_PATTERNS = [
+    r"\bmi\b", r"\bmis\b", r"\bmío\b", r"\bmía\b",
+    r"\bfavorito\b", r"\bfavorita\b",
+    r"\banime\b", r"\bjefes\b", r"\bjefe\b",
+    r"\bhermano\b", r"\bhermana\b", r"\bgemelo\b", r"\bgemela\b",
+    r"\bedad\b", r"\bnombre\b", r"\bnombres\b",
+    r"\bmis\s+\d+\b",
+]
+
+def is_private_question(text: str) -> bool:
+    t = text.lower()
+    return any(re.search(pat, t) for pat in _PRIVATE_PATTERNS)
+
+_REFUSE = "No tengo esa información en mi entrenamiento actual."
+
+
+# -----------------------------------------------------------------------------
+# Fact validation (anti-alucinación)
+# -----------------------------------------------------------------------------
+_JUNK_PATTERNS = [
+    r"enlaces externos", r"sitio web oficial", r"sitio oficial",
+    r"\bcánid", r"\bfélid",
+]
+
+def _fact_key(fact: str) -> str:
+    """
+    Extrae la pieza clave del hecho, p.ej:
+      'La capital de Francia es París.' -> 'París'
+    """
+    m = re.search(r"\bes\s+(.+?)\.\s*$", fact.strip(), flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # fallback: última palabra sin punto
+    return fact.strip().rstrip(".").split()[-1].strip()
+
+def _looks_bad(answer: str) -> bool:
+    a = answer.lower()
+    return any(re.search(p, a) for p in _JUNK_PATTERNS)
+
+def _validate_against_fact(answer: str, fact: str) -> bool:
+    key = _fact_key(fact)
+    if not key:
+        return False
+    # validación por inclusión simple (robusta para tiny)
+    return key.lower() in answer.lower() and not _looks_bad(answer)
+
+
+# -----------------------------------------------------------------------------
+# Core generation
+# -----------------------------------------------------------------------------
+def _generate_only(
+    user_prompt: str,
+    *,
+    assets: Assets,
+    max_new_tokens: int,
+    min_new_tokens: int,
+    stop_at_period: int,
+    period_id: int,
+    top_k: int,
+    temperature: float,
+    repetition_penalty: float,
+    no_repeat_ngram: int,
+) -> str:
+    prompt = f"<instr> {user_prompt}<resp>"
+    enc = assets.tokenizer.encode(prompt)
+    input_ids = torch.tensor([enc.ids], dtype=torch.long, device=torch.device(assets.device))
+
+    greedy = (int(top_k) == 0)
+    temp = 1.0 if greedy else float(temperature)
+
+    out_ids = generate(
+        model=assets.model,
+        input_ids=input_ids,
+        max_new_tokens=int(max_new_tokens),
+        block_size=int(assets.cfg.max_seq_len),
+        temperature=float(temp),
+        top_k=int(top_k),
+        eos_id=assets.eos_id,
+        repetition_penalty=float(repetition_penalty),
+        no_repeat_ngram=int(no_repeat_ngram),
+        min_new_tokens=int(min_new_tokens),
+        banned_ids=assets.banned_ids,
+        debug_next=0,
+        tokenizer=assets.tokenizer,
+        stop_at_period=bool(int(stop_at_period)),
+        period_id=int(period_id),
+    )
+
+    full = out_ids[0].tolist()
+    gen_only = full[len(enc.ids):]
+    return _clean_text(assets.tokenizer.decode(gen_only))
+
+
+# -----------------------------------------------------------------------------
+# Public APIs
+# -----------------------------------------------------------------------------
+def answer(
+    user_prompt: str,
+    *,
+    meta_path: Optional[str] = None,
+    ckpt_path: Optional[str] = None,
+    tokenizer_path: Optional[str] = None,
+    device: Optional[str] = None,
+    max_new_tokens: int = 64,
+    min_new_tokens: int = 2,
+    stop_at_period: int = 1,
+    period_id: int = 19,
+    top_k: int = 0,
+    temperature: float = 1.0,
+    repetition_penalty: float = 1.0,
+    no_repeat_ngram: int = 0,
+    seed: Optional[int] = 42,
+    n_heads_legacy: int = 4,
+    forbid_special: int = 1,
+    ban_replacement: int = 1,
+) -> str:
+    a, _ = answer_with_meta(
+        user_prompt,
+        meta_path=meta_path,
+        ckpt_path=ckpt_path,
+        tokenizer_path=tokenizer_path,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        min_new_tokens=min_new_tokens,
+        stop_at_period=stop_at_period,
+        period_id=period_id,
+        top_k=top_k,
+        temperature=temperature,
+        repetition_penalty=repetition_penalty,
+        no_repeat_ngram=no_repeat_ngram,
+        seed=seed,
+        n_heads_legacy=n_heads_legacy,
+        forbid_special=forbid_special,
+        ban_replacement=ban_replacement,
+    )
+    return a
+
+
 def answer_with_meta(
     user_prompt: str,
     *,
@@ -213,21 +274,8 @@ def answer_with_meta(
     n_heads_legacy: int = 4,
     forbid_special: int = 1,
     ban_replacement: int = 1,
-) -> Tuple[str, Dict[str, object]]:
-    # 0) Private guard
-    if is_private_question(user_prompt):
-        return REFUSAL, {
-            "used_private_guard": True,
-            "used_fact": False,
-            "fact": "",
-            "took_ms": 0.0,
-        }
-
-    # 1) Fact lookup (returns "" si no hay)
-    fact = faq_fact(user_prompt) or ""
-    has_fact = bool(fact.strip())
-
-    # Defaults por env
+) -> Tuple[str, Dict[str, Any]]:
+    # defaults por env
     meta_path = meta_path or _env("LLM_META", "models/tokenized/oscar_bpe_v4/meta.json")
     tokenizer_path = tokenizer_path or _env("LLM_TOKENIZER", "models/tokenizers/oscar_bpe_v4/tokenizer.json")
     ckpt_path = ckpt_path or _env("LLM_CKPT", "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt")
@@ -236,6 +284,17 @@ def answer_with_meta(
     if seed is not None:
         torch.manual_seed(int(seed))
 
+    # 1) Private guard (cero alucinación)
+    if is_private_question(user_prompt):
+        return _REFUSE, {
+            "used_private_guard": True,
+            "used_fact": False,
+            "fact": "",
+            "fact_validation_fallback": False,
+            "took_ms": 0.0,
+        }
+
+    # 2) Load assets
     assets = _load_assets_once(
         meta_path=meta_path,
         ckpt_path=ckpt_path,
@@ -246,55 +305,79 @@ def answer_with_meta(
         ban_replacement=int(ban_replacement),
     )
 
-    prompt = _build_prompt(user_prompt, fact=fact)
-    enc = assets.tokenizer.encode(prompt)
-    input_ids = torch.tensor([enc.ids], dtype=torch.long, device=torch.device(assets.device))
-
-    greedy = (int(top_k) == 0)
-    temp = 1.0 if greedy else float(temperature)
+    # 3) Fact (si existe)
+    fact = faq_fact(user_prompt) or ""
+    used_fact = bool(fact.strip())
 
     t0 = time.perf_counter()
 
-    out_ids = generate(
-        model=assets.model,
-        input_ids=input_ids,
-        max_new_tokens=int(max_new_tokens),
-        block_size=int(assets.cfg.max_seq_len),
-        temperature=float(temp),
-        top_k=int(top_k),
-        eos_id=assets.eos_id,
-        repetition_penalty=float(max(repetition_penalty, 1.15) if has_fact else repetition_penalty),
-        no_repeat_ngram=int(max(no_repeat_ngram, 3) if has_fact else no_repeat_ngram),
-        min_new_tokens=int(max(min_new_tokens, 8) if has_fact else min_new_tokens),
-        banned_ids=assets.banned_ids,
-        debug_next=0,
-        tokenizer=assets.tokenizer,
-        stop_at_period=(False if has_fact else bool(int(stop_at_period))),
-        period_id=int(period_id),
-    )
+    if used_fact:
+        # Prompt más estricto para “sonar LLM” pero anclado al hecho
+        guided_prompt = (
+            "Responde con UNA sola oración, breve y correcta. "
+            "No agregues información extra.\n"
+            f"HECHO: {fact}\n"
+            f"PREGUNTA: {user_prompt}"
+        )
 
+        # Parámetros más seguros para tiny
+        ans = _generate_only(
+            guided_prompt,
+            assets=assets,
+            max_new_tokens=min(int(max_new_tokens), 32),
+            min_new_tokens=int(min_new_tokens),
+            stop_at_period=1,
+            period_id=int(period_id),
+            top_k=int(top_k),
+            temperature=float(temperature),
+            repetition_penalty=max(float(repetition_penalty), 1.15),
+            no_repeat_ngram=max(int(no_repeat_ngram), 3),
+        )
+
+        took_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Si el modelo devuelve solo “París.” o se va por otro lado, forzamos una salida humana correcta
+        #  - Si no valida contra el hecho -> devolvemos el fact directamente (0 alucinación)
+        #  - Si valida pero viene demasiado corto -> devolvemos el fact para que “suene” completo
+        fact_ok = _validate_against_fact(ans, fact)
+        too_short = (ans.strip().rstrip(".") == _fact_key(fact).strip()) or (len(ans.strip()) <= 8)
+
+        if (not fact_ok) or too_short:
+            return _clean_text(fact), {
+                "used_private_guard": False,
+                "used_fact": True,
+                "fact": fact,
+                "fact_validation_fallback": True,
+                "took_ms": round(took_ms, 2),
+            }
+
+        return ans, {
+            "used_private_guard": False,
+            "used_fact": True,
+            "fact": fact,
+            "fact_validation_fallback": False,
+            "took_ms": round(took_ms, 2),
+        }
+
+    # 4) LLM normal (sin fact)
+    ans = _generate_only(
+        user_prompt,
+        assets=assets,
+        max_new_tokens=int(max_new_tokens),
+        min_new_tokens=int(min_new_tokens),
+        stop_at_period=int(stop_at_period),
+        period_id=int(period_id),
+        top_k=int(top_k),
+        temperature=float(temperature),
+        repetition_penalty=float(repetition_penalty),
+        no_repeat_ngram=int(no_repeat_ngram),
+    )
     took_ms = (time.perf_counter() - t0) * 1000.0
 
-    full = out_ids[0].tolist()
-    gen_only = full[len(enc.ids):]
-    text = assets.tokenizer.decode(gen_only)
-    text = _clean_text(text)
-    text = _dedupe_repeats(text)
-
-    # Si hay HECHO y el modelo se desvía (tiny model), forzamos respuesta grounded
-    if has_fact:
-        low = text.lower()
-        if ("no tengo esa información" in low) or (len(text.strip()) < 5):
-            text = fact.strip()
-
-    return text, {
+    return ans, {
         "used_private_guard": False,
-        "used_fact": has_fact,
-        "fact": fact.strip(),
-        "took_ms": round(float(took_ms), 2),
+        "used_fact": False,
+        "fact": "",
+        "fact_validation_fallback": False,
+        "took_ms": round(took_ms, 2),
     }
-
-
-def answer(*args, **kwargs) -> str:
-    text, _meta = answer_with_meta(*args, **kwargs)
-    return text
